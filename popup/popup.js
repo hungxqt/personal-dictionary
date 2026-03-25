@@ -1,5 +1,5 @@
 import { LANGUAGES } from "../lib/languages.js";
-import { lookupSourceSynonyms, translateTextDetailed, translateTextList } from "../lib/translator.js";
+import { lookupSourceAntonyms, lookupSourceSynonyms, translateTextDetailed, translateTextList } from "../lib/translator.js";
 import {
   initializeDatabase,
   chooseCustomDatabaseFile,
@@ -16,11 +16,16 @@ const state = {
   targetLang: "vi",
   synonyms: [],
   synonymsLoaded: false,
-  synonymsVisible: false,
-  synonymStatusMessage: "",
-  synonymTargetLang: "vi",
-  synonymPage: 1,
-  synonymPageSize: 5,
+  antonyms: [],
+  antonymsLoaded: false,
+  thesaurusVisibleType: "",
+  thesaurusStatusMessages: {
+    synonyms: "",
+    antonyms: ""
+  },
+  thesaurusTargetLang: "vi",
+  thesaurusPage: 1,
+  thesaurusPageSize: 5,
   deck: [],
   selectedDeckIds: new Set(),
   deckClipboard: [],
@@ -28,8 +33,7 @@ const state = {
   deckPage: 1,
   deckPageSize: 10,
   googleApiKey: "",
-  microsoftTranslatorApiKey: "",
-  microsoftTranslatorRegion: "",
+  merriamWebsterApiKey: "",
   highlightBlockedUrls: []
 };
 
@@ -52,8 +56,17 @@ const DECK_TRANSFER_FORMATS = {
 };
 
 const DEFAULT_TRANSLATED_PLACEHOLDER = "Translation appears here...";
-const DEFAULT_SYNONYM_MESSAGE = "Translate text first, then click Synonyms.";
-const READY_SYNONYM_MESSAGE = "Click Synonyms to load suggestions.";
+const DEFAULT_THESAURUS_MESSAGE = "Translate text first, then click Synonyms or Antonyms.";
+const READY_THESAURUS_MESSAGE = "Click Synonyms or Antonyms to load suggestions.";
+const THESAURUS_TYPES = ["synonyms", "antonyms"];
+const THESAURUS_LABELS = {
+  synonyms: "Synonyms",
+  antonyms: "Antonyms"
+};
+const THESAURUS_SINGULAR_LABELS = {
+  synonyms: "Synonym",
+  antonyms: "Antonym"
+};
 
 const el = {
   app: document.querySelector(".app"),
@@ -65,6 +78,7 @@ const el = {
   sourceText: document.getElementById("sourceText"),
   translatedText: document.getElementById("translatedText"),
   loadSynonymsBtn: document.getElementById("loadSynonymsBtn"),
+  loadAntonymsBtn: document.getElementById("loadAntonymsBtn"),
   synonymResults: document.getElementById("synonymResults"),
   synonymPagination: document.getElementById("synonymPagination"),
   synonymPrevPageBtn: document.getElementById("synonymPrevPageBtn"),
@@ -89,10 +103,9 @@ const el = {
   googleApiKey: document.getElementById("googleApiKey"),
   saveApiKeyBtn: document.getElementById("saveApiKeyBtn"),
   clearApiKeyBtn: document.getElementById("clearApiKeyBtn"),
-  microsoftTranslatorApiKey: document.getElementById("microsoftTranslatorApiKey"),
-  microsoftTranslatorRegion: document.getElementById("microsoftTranslatorRegion"),
-  saveMicrosoftTranslatorBtn: document.getElementById("saveMicrosoftTranslatorBtn"),
-  clearMicrosoftTranslatorBtn: document.getElementById("clearMicrosoftTranslatorBtn"),
+  merriamWebsterApiKey: document.getElementById("merriamWebsterApiKey"),
+  saveMerriamWebsterBtn: document.getElementById("saveMerriamWebsterBtn"),
+  clearMerriamWebsterBtn: document.getElementById("clearMerriamWebsterBtn"),
   dbSummaryLabel: document.getElementById("dbSummaryLabel"),
   dbLocationLabel: document.getElementById("dbLocationLabel"),
   useDefaultDbBtn: document.getElementById("useDefaultDbBtn"),
@@ -215,25 +228,77 @@ function schedulePopupResize() {
   });
 }
 
-function setSynonymButtonState({ disabled = true, loading = false } = {}) {
-  el.loadSynonymsBtn.disabled = disabled;
-  if (loading) {
-    el.loadSynonymsBtn.textContent = "Loading...";
+function getThesaurusButton(type) {
+  return type === "antonyms" ? el.loadAntonymsBtn : el.loadSynonymsBtn;
+}
+
+function getThesaurusItems(type) {
+  return type === "antonyms" ? state.antonyms : state.synonyms;
+}
+
+function setThesaurusItems(type, items) {
+  if (type === "antonyms") {
+    state.antonyms = items;
     return;
   }
 
-  if (state.synonymsVisible) {
-    el.loadSynonymsBtn.textContent = "Hide Synonyms";
+  state.synonyms = items;
+}
+
+function getThesaurusLoaded(type) {
+  return type === "antonyms" ? state.antonymsLoaded : state.synonymsLoaded;
+}
+
+function setThesaurusLoaded(type, loaded) {
+  if (type === "antonyms") {
+    state.antonymsLoaded = loaded;
     return;
   }
 
-  el.loadSynonymsBtn.textContent = state.synonymsLoaded ? "Show Synonyms" : "Synonyms";
+  state.synonymsLoaded = loaded;
+}
+
+function getThesaurusLabel(type) {
+  return THESAURUS_LABELS[type] || THESAURUS_LABELS.synonyms;
+}
+
+function getThesaurusSingularLabel(type) {
+  return THESAURUS_SINGULAR_LABELS[type] || THESAURUS_SINGULAR_LABELS.synonyms;
+}
+
+function setThesaurusStatusMessage(type, message) {
+  state.thesaurusStatusMessages[type] = message;
+}
+
+function getThesaurusStatusMessage(type) {
+  return state.thesaurusStatusMessages[type] || DEFAULT_THESAURUS_MESSAGE;
+}
+
+function setThesaurusButtonState({ disabled = true, loadingType = "" } = {}) {
+  THESAURUS_TYPES.forEach((type) => {
+    const button = getThesaurusButton(type);
+    if (!button) return;
+
+    button.disabled = disabled;
+
+    if (loadingType === type) {
+      button.textContent = "Loading...";
+      return;
+    }
+
+    if (state.thesaurusVisibleType === type) {
+      button.textContent = `Hide ${getThesaurusLabel(type)}`;
+      return;
+    }
+
+    button.textContent = getThesaurusLoaded(type) ? `Show ${getThesaurusLabel(type)}` : getThesaurusLabel(type);
+  });
 }
 
 function updateSynonymPagination(totalItems) {
-  const pageSize = state.synonymPageSize;
+  const pageSize = state.thesaurusPageSize;
   const totalPages = totalItems > 0 ? Math.ceil(totalItems / pageSize) : 1;
-  state.synonymPage = Math.min(Math.max(state.synonymPage, 1), totalPages);
+  state.thesaurusPage = Math.min(Math.max(state.thesaurusPage, 1), totalPages);
 
   if (!totalItems) {
     el.synonymPagination.hidden = true;
@@ -243,34 +308,34 @@ function updateSynonymPagination(totalItems) {
     return { startIndex: 0, endIndex: 0 };
   }
 
-  const startIndex = (state.synonymPage - 1) * pageSize;
+  const startIndex = (state.thesaurusPage - 1) * pageSize;
   const endIndex = Math.min(startIndex + pageSize, totalItems);
 
   el.synonymPagination.hidden = totalItems <= pageSize;
   el.synonymPaginationLabel.textContent = `${startIndex + 1} - ${endIndex} of ${totalItems}`;
-  el.synonymPrevPageBtn.disabled = state.synonymPage <= 1;
-  el.synonymNextPageBtn.disabled = state.synonymPage >= totalPages;
+  el.synonymPrevPageBtn.disabled = state.thesaurusPage <= 1;
+  el.synonymNextPageBtn.disabled = state.thesaurusPage >= totalPages;
 
   return { startIndex, endIndex };
 }
 
-function showSynonymPanel() {
-  state.synonymsVisible = true;
+function showSynonymPanel(type) {
+  state.thesaurusVisibleType = type;
   el.synonymResults.hidden = false;
   el.app?.classList.add("synonym-open");
 }
 
 function hideSynonymPanel() {
-  state.synonymsVisible = false;
+  state.thesaurusVisibleType = "";
   el.synonymResults.hidden = true;
   el.synonymPagination.hidden = true;
   el.app?.classList.remove("synonym-open");
-  setSynonymButtonState({ disabled: !state.translated.trim() });
+  setThesaurusButtonState({ disabled: !state.translated.trim() });
   schedulePopupResize();
 }
 
-function renderSynonymMessage(message = DEFAULT_SYNONYM_MESSAGE) {
-  state.synonymStatusMessage = message;
+function renderSynonymMessage(type, message = DEFAULT_THESAURUS_MESSAGE) {
+  setThesaurusStatusMessage(type, message);
   const emptyState = document.createElement("div");
   emptyState.className = "synonym-empty";
   emptyState.textContent = message;
@@ -283,9 +348,9 @@ function findLanguageName(code) {
   return LANGUAGES.find((lang) => lang.code === code)?.name || String(code || "").toUpperCase();
 }
 
-function renderSynonymResults(items, targetLang) {
+function renderSynonymResults(type, items, targetLang) {
   if (!items.length) {
-    renderSynonymMessage("No synonym suggestions found for this text.");
+    renderSynonymMessage(type, `No ${getThesaurusSingularLabel(type).toLowerCase()} suggestions found for this text.`);
     return;
   }
 
@@ -296,7 +361,7 @@ function renderSynonymResults(items, targetLang) {
   header.className = "synonym-results-head";
 
   const sourceLabel = document.createElement("div");
-  sourceLabel.textContent = "Synonym";
+  sourceLabel.textContent = getThesaurusSingularLabel(type);
 
   const targetLabel = document.createElement("div");
   targetLabel.textContent = `Meaning (${findLanguageName(targetLang)})`;
@@ -326,28 +391,35 @@ function renderSynonymResults(items, targetLang) {
   schedulePopupResize();
 }
 
-function resetSynonymOutput(message = DEFAULT_SYNONYM_MESSAGE) {
+function resetSynonymOutput(message = DEFAULT_THESAURUS_MESSAGE) {
   state.synonyms = [];
   state.synonymsLoaded = false;
-  state.synonymsVisible = false;
-  state.synonymStatusMessage = message;
-  state.synonymPage = 1;
+  state.antonyms = [];
+  state.antonymsLoaded = false;
+  state.thesaurusStatusMessages = {
+    synonyms: message,
+    antonyms: message
+  };
+  state.thesaurusPage = 1;
   hideSynonymPanel();
 }
 
 function goToSynonymPage(nextPage) {
-  state.synonymPage = Math.max(1, nextPage);
-  renderSynonymResults(state.synonyms, state.synonymTargetLang);
+  if (!state.thesaurusVisibleType) return;
+  state.thesaurusPage = Math.max(1, nextPage);
+  renderSynonymResults(state.thesaurusVisibleType, getThesaurusItems(state.thesaurusVisibleType), state.thesaurusTargetLang);
 }
 
-function showCachedSynonymPanel() {
-  showSynonymPanel();
-  if (state.synonyms.length) {
-    renderSynonymResults(state.synonyms, state.synonymTargetLang);
+function showCachedSynonymPanel(type) {
+  state.thesaurusPage = 1;
+  showSynonymPanel(type);
+  const items = getThesaurusItems(type);
+  if (items.length) {
+    renderSynonymResults(type, items, state.thesaurusTargetLang);
   } else {
-    renderSynonymMessage(state.synonymStatusMessage || DEFAULT_SYNONYM_MESSAGE);
+    renderSynonymMessage(type, getThesaurusStatusMessage(type));
   }
-  setSynonymButtonState({ disabled: !state.translated.trim() });
+  setThesaurusButtonState({ disabled: !state.translated.trim() });
 }
 
 function resetTranslationOutput(placeholder = DEFAULT_TRANSLATED_PLACEHOLDER) {
@@ -359,11 +431,11 @@ function resetTranslationOutput(placeholder = DEFAULT_TRANSLATED_PLACEHOLDER) {
 
 function resetTranslateOutputs({
   translatedPlaceholder = DEFAULT_TRANSLATED_PLACEHOLDER,
-  synonymMessage = DEFAULT_SYNONYM_MESSAGE
+  synonymMessage = DEFAULT_THESAURUS_MESSAGE
 } = {}) {
   resetTranslationOutput(translatedPlaceholder);
   resetSynonymOutput(synonymMessage);
-  setSynonymButtonState({ disabled: true });
+  setThesaurusButtonState({ disabled: true });
 }
 
 function normalizeDeckTextValue(value) {
@@ -929,8 +1001,8 @@ function swapSelectedLanguages() {
     el.sourceText.value = currentTranslatedText;
     el.translatedText.value = currentSourceText;
     state.translated = currentSourceText.trim();
-    resetSynonymOutput("Synonyms update after the next translation.");
-    setSynonymButtonState({ disabled: true });
+    resetSynonymOutput("Synonyms and antonyms update after the next translation.");
+    setThesaurusButtonState({ disabled: true });
     el.saveBtn.disabled = !state.translated;
   } else {
     resetTranslateOutputs();
@@ -1277,170 +1349,185 @@ async function clearGoogleApiKey() {
   setStatus("Google API key removed.");
 }
 
-async function loadMicrosoftTranslatorSettings() {
-  const data = await withPopupContext(
-    () => chrome.storage.local.get(["microsoftTranslatorApiKey", "microsoftTranslatorRegion"]),
-    null
-  );
+async function loadMerriamWebsterSettings() {
+  const data = await withPopupContext(() => chrome.storage.local.get(["merriamWebsterApiKey"]), null);
   if (!data) return;
 
-  state.microsoftTranslatorApiKey = data.microsoftTranslatorApiKey || "";
-  state.microsoftTranslatorRegion = data.microsoftTranslatorRegion || "";
-  el.microsoftTranslatorApiKey.value = state.microsoftTranslatorApiKey;
-  el.microsoftTranslatorRegion.value = state.microsoftTranslatorRegion;
+  state.merriamWebsterApiKey = data.merriamWebsterApiKey || "";
+  el.merriamWebsterApiKey.value = state.merriamWebsterApiKey;
 }
 
-async function saveMicrosoftTranslatorSettings() {
-  const apiKey = el.microsoftTranslatorApiKey.value.trim();
-  const region = el.microsoftTranslatorRegion.value.trim();
+async function saveMerriamWebsterSettings() {
+  const apiKey = el.merriamWebsterApiKey.value.trim();
 
-  state.microsoftTranslatorApiKey = apiKey;
-  state.microsoftTranslatorRegion = region;
+  state.merriamWebsterApiKey = apiKey;
 
-  await withPopupContext(
-    () =>
-      chrome.storage.local.set({
-        microsoftTranslatorApiKey: apiKey,
-        microsoftTranslatorRegion: region
-      }),
-    null
-  );
+  await withPopupContext(() => chrome.storage.local.set({ merriamWebsterApiKey: apiKey }), null);
   if (!popupContextAvailable) return;
 
-  setStatus(apiKey ? "Microsoft Translator settings saved." : "Microsoft Translator settings cleared.");
+  if (state.translated.trim()) {
+    resetSynonymOutput(READY_THESAURUS_MESSAGE);
+    setThesaurusButtonState({ disabled: false });
+  }
+
+  setStatus(apiKey ? "Merriam-Webster API key saved." : "Merriam-Webster API key cleared.");
 }
 
-async function clearMicrosoftTranslatorSettings() {
-  state.microsoftTranslatorApiKey = "";
-  state.microsoftTranslatorRegion = "";
-  el.microsoftTranslatorApiKey.value = "";
-  el.microsoftTranslatorRegion.value = "";
-  await withPopupContext(
-    () => chrome.storage.local.remove(["microsoftTranslatorApiKey", "microsoftTranslatorRegion"]),
-    null
-  );
+async function clearMerriamWebsterSettings() {
+  state.merriamWebsterApiKey = "";
+  el.merriamWebsterApiKey.value = "";
+  await withPopupContext(() => chrome.storage.local.remove(["merriamWebsterApiKey"]), null);
   if (!popupContextAvailable) return;
 
-  resetSynonymOutput("Add a Microsoft Translator API key in Settings to load synonyms.");
-  setStatus("Microsoft Translator settings removed.");
+  resetSynonymOutput("Add a Merriam-Webster API key in Settings to load synonyms or antonyms.");
+  setStatus("Merriam-Webster API key removed.");
 }
 
-async function loadSynonymsForCurrentTranslation() {
+async function loadSynonymsForCurrentTranslation(type = "synonyms") {
   const normalizedText = el.sourceText.value.trim();
   const sourceLang = state.sourceLang;
   const targetLang = state.targetLang;
+  const thesaurusLabel = getThesaurusLabel(type);
+  const thesaurusSingularLabel = getThesaurusSingularLabel(type).toLowerCase();
 
-  if (state.synonymsVisible) {
+  if (state.thesaurusVisibleType === type) {
     hideSynonymPanel();
     return;
   }
 
-  if (state.synonymsLoaded) {
-    showCachedSynonymPanel();
+  if (getThesaurusLoaded(type)) {
+    showCachedSynonymPanel(type);
     return;
   }
 
   if (!normalizedText || !state.translated.trim()) {
-    resetSynonymOutput(DEFAULT_SYNONYM_MESSAGE);
+    resetSynonymOutput(DEFAULT_THESAURUS_MESSAGE);
     setStatus("Translate text first.", true);
     return;
   }
 
-  if (!state.microsoftTranslatorApiKey) {
-    showSynonymPanel();
-    renderSynonymMessage("Add a Microsoft Translator API key in Settings to load synonyms.");
-    setSynonymButtonState({ disabled: false });
+  if (!state.merriamWebsterApiKey) {
+    showSynonymPanel(type);
+    renderSynonymMessage(type, "Add a Merriam-Webster API key in Settings to load synonyms or antonyms.");
+    setThesaurusButtonState({ disabled: false });
+    return;
+  }
+
+  if (!state.googleApiKey) {
+    showSynonymPanel(type);
+    renderSynonymMessage(type, "Add a Google API key in Settings to translate thesaurus results.");
+    setThesaurusButtonState({ disabled: false });
     return;
   }
 
   if (!sourceLang || sourceLang === "auto") {
-    showSynonymPanel();
-    renderSynonymMessage("Synonyms need a detected source language.");
-    setSynonymButtonState({ disabled: false });
+    showSynonymPanel(type);
+    renderSynonymMessage(type, `${thesaurusLabel} need a detected source language.`);
+    setThesaurusButtonState({ disabled: false });
     return;
   }
 
-  if (!targetLang || targetLang === "auto" || sourceLang === targetLang) {
-    showSynonymPanel();
-    renderSynonymMessage("Synonyms are unavailable for this language pair.");
-    setSynonymButtonState({ disabled: false });
+  if (sourceLang !== "en") {
+    showSynonymPanel(type);
+    renderSynonymMessage(type, `${thesaurusLabel} are available only when the original text is English.`);
+    setThesaurusButtonState({ disabled: false });
     return;
   }
 
-  showSynonymPanel();
-  setSynonymButtonState({ disabled: true, loading: true });
-  renderSynonymMessage("Loading synonym suggestions...");
+  if (!targetLang || targetLang === "auto") {
+    showSynonymPanel(type);
+    renderSynonymMessage(type, `${thesaurusLabel} need a specific target language.`);
+    setThesaurusButtonState({ disabled: false });
+    return;
+  }
+
+  showSynonymPanel(type);
+  setThesaurusButtonState({ disabled: true, loadingType: type });
+  renderSynonymMessage(type, `Loading ${thesaurusLabel.toLowerCase()}...`);
 
   try {
-    const synonyms = await lookupSourceSynonyms({
-      text: normalizedText,
-      source: sourceLang,
-      target: targetLang,
-      apiKey: state.microsoftTranslatorApiKey,
-      region: state.microsoftTranslatorRegion
-    });
+    const thesaurusItems =
+      type === "antonyms"
+        ? await lookupSourceAntonyms({
+            text: normalizedText,
+            apiKey: state.merriamWebsterApiKey
+          })
+        : await lookupSourceSynonyms({
+            text: normalizedText,
+            apiKey: state.merriamWebsterApiKey
+          });
 
-    if (!synonyms.length) {
-      state.synonyms = [];
-      state.synonymsLoaded = true;
-      state.synonymPage = 1;
-      renderSynonymMessage("No synonym suggestions found for this text.");
+    if (!thesaurusItems.length) {
+      setThesaurusItems(type, []);
+      setThesaurusLoaded(type, true);
+      state.thesaurusPage = 1;
+      renderSynonymMessage(type, `No ${thesaurusSingularLabel} suggestions found for this text.`);
       return;
     }
 
-    const translatedMeanings = await translateTextList({
-      texts: synonyms,
-      source: sourceLang,
-      target: targetLang,
-      apiKey: state.googleApiKey
-    });
+    let translatedMeanings;
+    try {
+      translatedMeanings = await translateTextList({
+        texts: thesaurusItems,
+        source: sourceLang,
+        target: targetLang,
+        apiKey: state.googleApiKey
+      });
+    } catch (error) {
+      throw new Error(`Google thesaurus translation failed: ${error?.message || "Unknown error"}`);
+    }
 
-    const synonymRows = synonyms.map((synonym, index) => ({
-      sourceText: synonym,
+    const thesaurusRows = thesaurusItems.map((term, index) => ({
+      sourceText: term,
       translatedText: translatedMeanings[index] || ""
     }));
 
-    state.synonyms = synonymRows;
-    state.synonymsLoaded = true;
-    state.synonymTargetLang = targetLang;
-    state.synonymPage = 1;
-    renderSynonymResults(synonymRows, targetLang);
-    setStatus("Synonyms loaded.");
+    setThesaurusItems(type, thesaurusRows);
+    setThesaurusLoaded(type, true);
+    state.thesaurusTargetLang = targetLang;
+    state.thesaurusPage = 1;
+    renderSynonymResults(type, thesaurusRows, targetLang);
+    setStatus(`${thesaurusLabel} loaded.`);
   } catch (error) {
     const message = String(error?.message || "");
     const normalizedMessage = message.toLowerCase();
 
-    if (
-      normalizedMessage.includes("dictionary") &&
-      (
-        normalizedMessage.includes("not supported") ||
-        normalizedMessage.includes("unsupported") ||
-        normalizedMessage.includes("language pair") ||
-        normalizedMessage.includes("not valid")
-      )
-    ) {
-      state.synonyms = [];
-      state.synonymsLoaded = true;
-      state.synonymPage = 1;
-      renderSynonymMessage("Synonyms are unavailable for this language pair.");
+    if (normalizedMessage.includes("suggestions:")) {
+      renderSynonymMessage(type, message);
       return;
     }
 
     if (
-      normalizedMessage.includes("subscription") ||
-      normalizedMessage.includes("authorization") ||
+      normalizedMessage.includes("google thesaurus translation failed")
+    ) {
+      renderSynonymMessage(type, "Google could not translate the thesaurus results right now.");
+      return;
+    }
+
+    if (
+      normalizedMessage.includes("merriam-webster api key") ||
+      normalizedMessage.includes("thesaurus lookup failed") ||
       normalizedMessage.includes("access denied") ||
       normalizedMessage.includes("401") ||
-      normalizedMessage.includes("403") ||
-      normalizedMessage.includes("region")
+      normalizedMessage.includes("403")
     ) {
-      renderSynonymMessage("Check the Microsoft Translator key and region in Settings.");
+      renderSynonymMessage(type, "Check the Merriam-Webster API key in Settings.");
       return;
     }
 
-    renderSynonymMessage("Synonyms could not be loaded right now.");
+    if (normalizedMessage.includes("english")) {
+      renderSynonymMessage(type, `${thesaurusLabel} are available only when the original text is English.`);
+      return;
+    }
+
+    if (normalizedMessage.includes("no thesaurus entry")) {
+      renderSynonymMessage(type, `No ${thesaurusSingularLabel} suggestions found for this text.`);
+      return;
+    }
+
+    renderSynonymMessage(type, `${thesaurusLabel} could not be loaded right now.`);
   } finally {
-    setSynonymButtonState({ disabled: !state.translated.trim() });
+    setThesaurusButtonState({ disabled: !state.translated.trim() });
   }
 }
 
@@ -1483,8 +1570,8 @@ async function translateCurrentText() {
     state.targetLang = targetLang;
     el.translatedText.value = translated;
     el.saveBtn.disabled = !translated;
-    resetSynonymOutput(READY_SYNONYM_MESSAGE);
-    setSynonymButtonState({ disabled: !translated });
+    resetSynonymOutput(READY_THESAURUS_MESSAGE);
+    setThesaurusButtonState({ disabled: !translated });
     schedulePopupResize();
     setStatus("Translation completed.");
   } catch (error) {
@@ -1718,9 +1805,10 @@ function bindEvents() {
 
   bindAsyncEvent(el.translateBtn, "click", translateCurrentText, "Translation failed.");
   bindAsyncEvent(el.saveBtn, "click", saveCurrentTranslation, "Could not save translation.");
-  bindAsyncEvent(el.loadSynonymsBtn, "click", loadSynonymsForCurrentTranslation, "Could not load synonyms.");
-  el.synonymPrevPageBtn.addEventListener("click", () => goToSynonymPage(state.synonymPage - 1));
-  el.synonymNextPageBtn.addEventListener("click", () => goToSynonymPage(state.synonymPage + 1));
+  bindAsyncEvent(el.loadSynonymsBtn, "click", () => loadSynonymsForCurrentTranslation("synonyms"), "Could not load synonyms.");
+  bindAsyncEvent(el.loadAntonymsBtn, "click", () => loadSynonymsForCurrentTranslation("antonyms"), "Could not load antonyms.");
+  el.synonymPrevPageBtn.addEventListener("click", () => goToSynonymPage(state.thesaurusPage - 1));
+  el.synonymNextPageBtn.addEventListener("click", () => goToSynonymPage(state.thesaurusPage + 1));
   el.swapLangBtn.addEventListener("click", swapSelectedLanguages);
 
   el.sourceText.addEventListener("input", handleTranslateInputsChanged);
@@ -1755,18 +1843,8 @@ function bindEvents() {
 
   bindAsyncEvent(el.saveApiKeyBtn, "click", saveGoogleApiKey, "Could not save API key.");
   bindAsyncEvent(el.clearApiKeyBtn, "click", clearGoogleApiKey, "Could not clear API key.");
-  bindAsyncEvent(
-    el.saveMicrosoftTranslatorBtn,
-    "click",
-    saveMicrosoftTranslatorSettings,
-    "Could not save Microsoft Translator settings."
-  );
-  bindAsyncEvent(
-    el.clearMicrosoftTranslatorBtn,
-    "click",
-    clearMicrosoftTranslatorSettings,
-    "Could not clear Microsoft Translator settings."
-  );
+  bindAsyncEvent(el.saveMerriamWebsterBtn, "click", saveMerriamWebsterSettings, "Could not save thesaurus API key.");
+  bindAsyncEvent(el.clearMerriamWebsterBtn, "click", clearMerriamWebsterSettings, "Could not clear thesaurus API key.");
 
   el.deckList.addEventListener("change", (event) => {
     const target = event.target;
@@ -1855,7 +1933,7 @@ async function init() {
     refreshDatabaseLocationLabel(),
     loadHighlightSetting(),
     loadGoogleApiKey(),
-    loadMicrosoftTranslatorSettings()
+    loadMerriamWebsterSettings()
   ]);
   const loadedSelection = await fillTranslateFromActiveTabSelection();
   if (!loadedSelection) {

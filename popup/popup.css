@@ -322,6 +322,8 @@ button:disabled {
 .synonym-toolbar {
   display: flex;
   justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .aux-action-btn {

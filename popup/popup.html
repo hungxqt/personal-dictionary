@@ -41,6 +41,7 @@
         <div class="row synonym-section">
           <div class="synonym-toolbar">
             <button id="loadSynonymsBtn" class="aux-action-btn" type="button" disabled>Synonyms</button>
+            <button id="loadAntonymsBtn" class="aux-action-btn" type="button" disabled>Antonyms</button>
           </div>
           <div id="synonymResults" class="synonym-results" aria-live="polite" hidden></div>
           <div id="synonymPagination" class="synonym-pagination" aria-label="Synonym pagination" hidden>
@@ -167,20 +168,18 @@
         </div>
 
         <div class="setting-card">
-          <h3>Synonym Provider (Microsoft Translator)</h3>
-          <p class="muted">Uses Azure AI Translator Dictionary Lookup for source-word synonym suggestions.</p>
+          <h3>Thesaurus Provider (Merriam-Webster)</h3>
+          <p class="muted">Uses Merriam-Webster's Collegiate Thesaurus API for English synonyms and antonyms.</p>
           <div class="row">
-            <label for="microsoftTranslatorApiKey">Microsoft Translator API Key</label>
-            <input id="microsoftTranslatorApiKey" type="password" placeholder="Azure Translator key" />
+            <label for="merriamWebsterApiKey">Merriam-Webster API Key</label>
+            <input id="merriamWebsterApiKey" type="password" placeholder="Merriam-Webster key" />
           </div>
-          <div class="row">
-            <label for="microsoftTranslatorRegion">Azure Region</label>
-            <input id="microsoftTranslatorRegion" type="text" placeholder="e.g. southeastasia" />
-          </div>
-          <p class="muted small">Leave region blank only if your Translator resource does not require it.</p>
+          <p class="muted small">
+            The thesaurus lookup is English-only. Google is still used to translate the meaning column into your target language.
+          </p>
           <div class="actions wrap">
-            <button id="saveMicrosoftTranslatorBtn">Save Microsoft Settings</button>
-            <button id="clearMicrosoftTranslatorBtn">Clear Microsoft Settings</button>
+            <button id="saveMerriamWebsterBtn">Save Thesaurus Key</button>
+            <button id="clearMerriamWebsterBtn">Clear Thesaurus Key</button>
           </div>
         </div>
 
