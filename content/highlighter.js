@@ -6,6 +6,10 @@ const HIGHLIGHT_APPLY_BATCH_SIZE = 150;
 const SELECTION_SYNC_DELAY_MS = 120;
 const SELECTION_ACTION_SETTLE_DELAY_MS = 24;
 const INLINE_TRANSLATE_TARGET_LANG = "vi";
+const INLINE_POPUP_TARGET_LINE_COUNT = 4;
+const INLINE_POPUP_MIN_WIDTH = 188;
+const INLINE_POPUP_MAX_WIDTH = 560;
+const INLINE_POPUP_MIN_BOX_WIDTH = 68;
 
 let lastSelectedText = "";
 let tooltipElement = null;
@@ -39,6 +43,7 @@ let highlightCache = {
 let inlinePopupState = createInlinePopupState();
 let extensionContextAvailable = true;
 const pageEventController = new AbortController();
+let inlinePopupMeasureElement = null;
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -426,10 +431,164 @@ function ensureSelectionPopupElement() {
   return selectionPopupElement;
 }
 
+function ensureInlinePopupMeasureElement() {
+  if (inlinePopupMeasureElement?.isConnected) return inlinePopupMeasureElement;
+
+  inlinePopupMeasureElement = document.createElement("div");
+  inlinePopupMeasureElement.hidden = true;
+  inlinePopupMeasureElement.setAttribute("aria-hidden", "true");
+  inlinePopupMeasureElement.style.position = "fixed";
+  inlinePopupMeasureElement.style.left = "-99999px";
+  inlinePopupMeasureElement.style.top = "-99999px";
+  inlinePopupMeasureElement.style.visibility = "hidden";
+  inlinePopupMeasureElement.style.pointerEvents = "none";
+  inlinePopupMeasureElement.style.maxHeight = "none";
+  inlinePopupMeasureElement.style.minHeight = "0";
+  inlinePopupMeasureElement.style.height = "auto";
+  inlinePopupMeasureElement.style.overflow = "visible";
+  inlinePopupMeasureElement.style.contain = "layout style";
+  document.documentElement.appendChild(inlinePopupMeasureElement);
+  return inlinePopupMeasureElement;
+}
+
+function countMeasuredLines(measureElement) {
+  const computedStyle = getComputedStyle(measureElement);
+  const lineHeight = getResolvedLineHeight(computedStyle);
+  const paddingTop = parseFloat(computedStyle.paddingTop || "0");
+  const paddingBottom = parseFloat(computedStyle.paddingBottom || "0");
+  const contentHeight = Math.max(measureElement.scrollHeight - paddingTop - paddingBottom, 0);
+
+  return Math.max(1, Math.ceil(contentHeight / lineHeight));
+}
+
+function countRenderedLines(element) {
+  if (!element) return 1;
+
+  const computedStyle = getComputedStyle(element);
+  const lineHeight = getResolvedLineHeight(computedStyle);
+  const paddingTop = parseFloat(computedStyle.paddingTop || "0");
+  const paddingBottom = parseFloat(computedStyle.paddingBottom || "0");
+  const contentHeight = Math.max(element.scrollHeight - paddingTop - paddingBottom, 0);
+
+  return Math.max(1, Math.ceil(contentHeight / lineHeight));
+}
+
+function getResolvedLineHeight(computedStyle) {
+  const numericLineHeight = parseFloat(computedStyle.lineHeight || "");
+  if (Number.isFinite(numericLineHeight) && numericLineHeight > 0) {
+    return numericLineHeight;
+  }
+
+  const fontSize = parseFloat(computedStyle.fontSize || "12");
+  return (Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 12) * 1.45;
+}
+
+function measureInlinePopupParagraphWidth(referenceElement, text, minWidth, maxWidth) {
+  if (!referenceElement) return minWidth;
+
+  const rawText = String(text || "").trim();
+  if (!rawText) return minWidth;
+
+  const measureElement = ensureInlinePopupMeasureElement();
+  measureElement.className = referenceElement.className;
+  measureElement.textContent = rawText;
+  measureElement.hidden = false;
+
+  let low = Math.max(INLINE_POPUP_MIN_BOX_WIDTH, Math.floor(minWidth));
+  let high = Math.max(low, Math.floor(maxWidth));
+  let best = high;
+
+  while (low <= high) {
+    const width = Math.floor((low + high) / 2);
+    measureElement.style.width = `${width}px`;
+
+    const lineCount = countMeasuredLines(measureElement);
+    if (lineCount <= INLINE_POPUP_TARGET_LINE_COUNT) {
+      best = width;
+      high = width - 1;
+    } else {
+      low = width + 1;
+    }
+  }
+
+  measureElement.hidden = true;
+  return Math.min(Math.max(best, minWidth), maxWidth);
+}
+
+function updateInlinePopupWidth() {
+  if (!selectionPopupElement || !selectionPopupSourceElement || !selectionPopupResultElement) return;
+
+  const viewportMaxWidth = Math.max(INLINE_POPUP_MIN_WIDTH, window.innerWidth - 16);
+  const popupMaxWidth = Math.min(INLINE_POPUP_MAX_WIDTH, viewportMaxWidth);
+  const popupStyle = getComputedStyle(selectionPopupElement);
+  const popupHorizontalChrome =
+    parseFloat(popupStyle.paddingLeft || "0") +
+    parseFloat(popupStyle.paddingRight || "0") +
+    parseFloat(popupStyle.borderLeftWidth || "0") +
+    parseFloat(popupStyle.borderRightWidth || "0");
+  const sourceRowGap = parseFloat(getComputedStyle(selectionPopupSourceElement.parentElement).gap || "0");
+  const contentRowGap = parseFloat(getComputedStyle(selectionPopupResultElement.parentElement).gap || "0");
+  const metaWidth = selectionPopupMetaElement?.getBoundingClientRect().width || 0;
+  const saveButtonWidth = selectionPopupSaveButton?.getBoundingClientRect().width || 0;
+  const sourceBoxMaxWidth = Math.max(
+    INLINE_POPUP_MIN_BOX_WIDTH,
+    popupMaxWidth - popupHorizontalChrome - metaWidth - sourceRowGap
+  );
+  const resultBoxMaxWidth = Math.max(
+    INLINE_POPUP_MIN_BOX_WIDTH,
+    popupMaxWidth - popupHorizontalChrome - saveButtonWidth - contentRowGap
+  );
+  const sourceText = inlinePopupState.sourceText || " ";
+  const resultText = inlinePopupState.loading
+    ? "Translating..."
+    : inlinePopupState.translatedText || inlinePopupState.statusMessage || "Translation unavailable.";
+  const sourceBoxWidth = measureInlinePopupParagraphWidth(
+    selectionPopupSourceElement,
+    sourceText,
+    INLINE_POPUP_MIN_BOX_WIDTH,
+    sourceBoxMaxWidth
+  );
+  const resultBoxWidth = measureInlinePopupParagraphWidth(
+    selectionPopupResultElement,
+    resultText,
+    INLINE_POPUP_MIN_BOX_WIDTH,
+    resultBoxMaxWidth
+  );
+  const sourceRowWidth = sourceBoxWidth + metaWidth + sourceRowGap;
+  const contentRowWidth = resultBoxWidth + saveButtonWidth + contentRowGap;
+  const popupWidth = Math.min(
+    Math.max(Math.ceil(Math.max(sourceRowWidth, contentRowWidth) + popupHorizontalChrome), INLINE_POPUP_MIN_WIDTH),
+    popupMaxWidth
+  );
+
+  let resolvedPopupWidth = popupWidth;
+  selectionPopupElement.style.setProperty("--vocab-inline-popup-width", `${resolvedPopupWidth}px`);
+  selectionPopupElement.style.setProperty("width", `${resolvedPopupWidth}px`, "important");
+  selectionPopupElement.style.setProperty("min-width", `${resolvedPopupWidth}px`, "important");
+  selectionPopupElement.style.setProperty("max-width", `${resolvedPopupWidth}px`, "important");
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const sourceLines = countRenderedLines(selectionPopupSourceElement);
+    const resultLines = countRenderedLines(selectionPopupResultElement);
+    const maxLines = Math.max(sourceLines, resultLines);
+
+    if (maxLines <= INLINE_POPUP_TARGET_LINE_COUNT || resolvedPopupWidth >= popupMaxWidth) {
+      break;
+    }
+
+    const extraWidth = Math.max(28, (maxLines - INLINE_POPUP_TARGET_LINE_COUNT) * 36);
+    resolvedPopupWidth = Math.min(resolvedPopupWidth + extraWidth, popupMaxWidth);
+    selectionPopupElement.style.setProperty("--vocab-inline-popup-width", `${resolvedPopupWidth}px`);
+    selectionPopupElement.style.setProperty("width", `${resolvedPopupWidth}px`, "important");
+    selectionPopupElement.style.setProperty("min-width", `${resolvedPopupWidth}px`, "important");
+    selectionPopupElement.style.setProperty("max-width", `${resolvedPopupWidth}px`, "important");
+  }
+}
+
 function isSelectionBubbleVisible() {
   return !!selectionBubbleElement && !selectionBubbleElement.hidden;
 }
-
+//
 function isInlineTranslatePopupVisible() {
   return !!selectionPopupElement && !selectionPopupElement.hidden;
 }
@@ -530,6 +689,7 @@ function renderInlineTranslatePopup() {
         : "Save to Deck"
   );
   selectionPopupSaveButton.title = selectionPopupSaveButton.getAttribute("aria-label");
+  updateInlinePopupWidth();
 }
 
 function scheduleSelectionUiPosition() {
@@ -543,6 +703,7 @@ function scheduleSelectionUiPosition() {
     }
 
     if (isInlineTranslatePopupVisible()) {
+      updateInlinePopupWidth();
       positionFloatingElement(selectionPopupElement, selectionUiAnchorRect, 12);
     }
   });
@@ -566,6 +727,10 @@ function hideInlineTranslatePopup() {
 
   if (selectionPopupElement) {
     selectionPopupElement.hidden = true;
+    selectionPopupElement.style.removeProperty("--vocab-inline-popup-width");
+    selectionPopupElement.style.removeProperty("width");
+    selectionPopupElement.style.removeProperty("min-width");
+    selectionPopupElement.style.removeProperty("max-width");
   }
 }
 
@@ -597,6 +762,10 @@ async function openInlineTranslatePopup() {
   hideTooltip();
   hideSelectionBubble();
   ensureSelectionPopupElement().hidden = false;
+  selectionPopupElement.style.removeProperty("--vocab-inline-popup-width");
+  selectionPopupElement.style.removeProperty("width");
+  selectionPopupElement.style.removeProperty("min-width");
+  selectionPopupElement.style.removeProperty("max-width");
 
   inlinePopupState = {
     sourceText: selectionBubbleText,

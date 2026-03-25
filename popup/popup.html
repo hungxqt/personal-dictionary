@@ -29,7 +29,19 @@
           </div>
         </div>
         <div class="row">
-          <textarea id="sourceText" placeholder="Type text to translate..."></textarea>
+          <div class="textarea-wrap">
+            <textarea id="sourceText" placeholder="Type text to translate..."></textarea>
+            <button
+              id="clearSourceTextBtn"
+              class="textarea-clear-btn"
+              type="button"
+              aria-label="Clear source text"
+              title="Clear source text"
+              hidden
+            >
+              <span aria-hidden="true">×</span>
+            </button>
+          </div>
         </div>
         <div class="row actions">
           <button id="translateBtn">Translate</button>
@@ -80,15 +92,15 @@
               </svg>
             </button>
             <button
-              id="deckCutToolbarBtn"
+              id="deckModifyToolbarBtn"
               class="deck-icon-btn"
               type="button"
-              aria-label="Cut"
-              title="Cut"
-              data-tooltip="Cut"
+              aria-label="Modify"
+              title="Modify"
+              data-tooltip="Modify"
             >
               <svg class="deck-toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 6l16 12M20 6L8.5 14.6M5.5 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM5.5 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" />
+                <path d="M4 20h4l10-10-4-4L4 16v4zM13 7l4 4M15 5l4 4" />
               </svg>
             </button>
             <button

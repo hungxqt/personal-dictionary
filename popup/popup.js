@@ -28,6 +28,7 @@ const state = {
   thesaurusPageSize: 5,
   deck: [],
   selectedDeckIds: new Set(),
+  editingDeckItemId: "",
   deckClipboard: [],
   deckSort: "newest",
   deckPage: 1,
@@ -76,6 +77,7 @@ const el = {
   targetLang: document.getElementById("targetLang"),
   swapLangBtn: document.getElementById("swapLangBtn"),
   sourceText: document.getElementById("sourceText"),
+  clearSourceTextBtn: document.getElementById("clearSourceTextBtn"),
   translatedText: document.getElementById("translatedText"),
   loadSynonymsBtn: document.getElementById("loadSynonymsBtn"),
   loadAntonymsBtn: document.getElementById("loadAntonymsBtn"),
@@ -89,7 +91,7 @@ const el = {
   deckSearch: document.getElementById("deckSearch"),
   deckAddManualBtn: document.getElementById("deckAddManualBtn"),
   deckDeleteToolbarBtn: document.getElementById("deckDeleteToolbarBtn"),
-  deckCutToolbarBtn: document.getElementById("deckCutToolbarBtn"),
+  deckModifyToolbarBtn: document.getElementById("deckModifyToolbarBtn"),
   deckPasteToolbarBtn: document.getElementById("deckPasteToolbarBtn"),
   deckSort: document.getElementById("deckSort"),
   importDeckBtn: document.getElementById("importDeckBtn"),
@@ -466,11 +468,47 @@ function showCachedSynonymPanel(type) {
   setThesaurusButtonState({ disabled: !state.translated.trim() });
 }
 
+function isEditingDeckItem() {
+  return Boolean(state.editingDeckItemId);
+}
+
+function setTranslatedTextEditable(editable) {
+  el.translatedText.readOnly = !editable;
+  el.translatedText.classList.toggle("editable-translation", editable);
+}
+
+function updateTranslateSaveButtonState() {
+  if (isEditingDeckItem()) {
+    const hasSource = Boolean(el.sourceText.value.trim());
+    const translatedText = el.translatedText.value.trim();
+    state.translated = translatedText;
+    el.saveBtn.disabled = !(hasSource && translatedText);
+    return;
+  }
+
+  el.saveBtn.disabled = !state.translated.trim();
+}
+
+function updateSaveButtonLabel() {
+  const editing = isEditingDeckItem();
+  el.saveBtn.textContent = editing ? "Update Card" : "Save to Deck";
+  el.saveBtn.title = editing ? "Update selected card" : "Save to Deck";
+}
+
+function exitDeckEditMode() {
+  if (!isEditingDeckItem()) return;
+
+  state.editingDeckItemId = "";
+  setTranslatedTextEditable(false);
+  updateSaveButtonLabel();
+  updateTranslateSaveButtonState();
+}
+
 function resetTranslationOutput(placeholder = DEFAULT_TRANSLATED_PLACEHOLDER) {
   state.translated = "";
   el.translatedText.value = "";
   el.translatedText.placeholder = placeholder;
-  el.saveBtn.disabled = true;
+  updateTranslateSaveButtonState();
 }
 
 function resetTranslateOutputs({
@@ -1026,6 +1064,58 @@ function updateSwapLanguageButtonState() {
   el.swapLangBtn.title = disabled ? 'Choose a specific "From" language to enable switching.' : "Swap languages";
 }
 
+function updateClearSourceTextButtonState() {
+  if (!el.clearSourceTextBtn) return;
+
+  el.clearSourceTextBtn.hidden = !el.sourceText.value.trim();
+}
+
+function clearSourceText() {
+  if (!el.sourceText.value && !el.translatedText.value && !isEditingDeckItem()) return;
+
+  exitDeckEditMode();
+  el.sourceText.value = "";
+  resetTranslateOutputs();
+  updateClearSourceTextButtonState();
+  el.sourceText.focus();
+}
+
+function handleTranslatedTextChanged() {
+  if (!isEditingDeckItem()) return;
+
+  state.translated = el.translatedText.value.trim();
+  updateTranslateSaveButtonState();
+  schedulePopupResize();
+}
+
+function enterDeckEditMode(item) {
+  state.editingDeckItemId = item.id;
+  state.sourceLang = item.sourceLang || "auto";
+  state.targetLang = item.targetLang || "vi";
+
+  el.sourceLang.value = state.sourceLang;
+  el.targetLang.value = state.targetLang;
+  el.sourceText.value = item.sourceText;
+  el.translatedText.value = item.translatedText;
+  el.translatedText.placeholder = DEFAULT_TRANSLATED_PLACEHOLDER;
+  state.translated = item.translatedText.trim();
+
+  setTranslatedTextEditable(true);
+  updateSaveButtonLabel();
+  updateSwapLanguageButtonState();
+  updateClearSourceTextButtonState();
+  updateTranslateSaveButtonState();
+  resetSynonymOutput(READY_THESAURUS_MESSAGE);
+  setThesaurusButtonState({ disabled: !state.translated.trim() });
+  switchTab("translate");
+  schedulePopupResize();
+
+  window.setTimeout(() => {
+    el.sourceText.focus();
+    el.sourceText.setSelectionRange(el.sourceText.value.length, el.sourceText.value.length);
+  }, 0);
+}
+
 function swapSelectedLanguages() {
   const currentSourceLang = el.sourceLang.value;
   const currentTargetLang = el.targetLang.value;
@@ -1051,11 +1141,12 @@ function swapSelectedLanguages() {
     state.translated = currentSourceText.trim();
     resetSynonymOutput("Synonyms and antonyms update after the next translation.");
     setThesaurusButtonState({ disabled: true });
-    el.saveBtn.disabled = !state.translated;
+    updateTranslateSaveButtonState();
   } else {
     resetTranslateOutputs();
   }
 
+  updateClearSourceTextButtonState();
   setStatus("Languages switched.");
 }
 
@@ -1135,6 +1226,7 @@ async function fillTranslateFromActiveTabSelection() {
 
   el.sourceText.value = selectedText;
   resetTranslateOutputs();
+  updateClearSourceTextButtonState();
   setStatus("Selected text loaded into Translate.");
   return true;
 }
@@ -1142,7 +1234,15 @@ async function fillTranslateFromActiveTabSelection() {
 function handleTranslateInputsChanged() {
   state.sourceLang = el.sourceLang.value;
   state.targetLang = el.targetLang.value;
+  if (isEditingDeckItem()) {
+    resetSynonymOutput("Synonyms and antonyms update after the next translation.");
+    updateClearSourceTextButtonState();
+    updateTranslateSaveButtonState();
+    return;
+  }
+
   resetTranslateOutputs();
+  updateClearSourceTextButtonState();
 }
 
 function handleSourceTextKeyDown(event) {
@@ -1617,7 +1717,7 @@ async function translateCurrentText() {
     state.sourceLang = effectiveSourceLang;
     state.targetLang = targetLang;
     el.translatedText.value = translated;
-    el.saveBtn.disabled = !translated;
+    updateTranslateSaveButtonState();
     resetSynonymOutput(READY_THESAURUS_MESSAGE);
     setThesaurusButtonState({ disabled: !translated });
     schedulePopupResize();
@@ -1630,10 +1730,48 @@ async function translateCurrentText() {
 
 async function saveCurrentTranslation() {
   const sourceText = el.sourceText.value.trim();
-  const translatedText = state.translated.trim();
+  const translatedText = (isEditingDeckItem() ? el.translatedText.value : state.translated).trim();
 
   if (!sourceText || !translatedText) {
-    setStatus("Translate text before saving.", true);
+    setStatus(isEditingDeckItem() ? "Enter both source and translated text before updating." : "Translate text before saving.", true);
+    return;
+  }
+
+  if (isEditingDeckItem()) {
+    const editingItemIndex = state.deck.findIndex((item) => item.id === state.editingDeckItemId);
+    if (editingItemIndex === -1) {
+      exitDeckEditMode();
+      resetTranslateOutputs();
+      updateClearSourceTextButtonState();
+      setStatus("The selected deck item no longer exists.", true);
+      return;
+    }
+
+    const existingItem = state.deck[editingItemIndex];
+    const updatedItem = {
+      ...existingItem,
+      sourceText,
+      translatedText,
+      sourceLang: state.sourceLang,
+      targetLang: state.targetLang
+    };
+
+    state.deck = sortDeckItemsByNewest(
+      state.deck.map((item) => (item.id === updatedItem.id ? updatedItem : item))
+    );
+    state.selectedDeckIds = new Set([updatedItem.id]);
+    await writeDeckItems(state.deck);
+    await withPopupContext(() => chrome.storage.local.set({ deckItems: state.deck }), null);
+    if (!popupContextAvailable) return;
+
+    exitDeckEditMode();
+    el.sourceText.value = "";
+    resetTranslateOutputs();
+    updateClearSourceTextButtonState();
+    renderDeck();
+    switchTab("deck");
+    showSaveToast("Deck item updated.");
+    setStatus("Deck item updated.");
     return;
   }
 
@@ -1657,17 +1795,42 @@ async function saveCurrentTranslation() {
 function pruneDeckSelection() {
   const deckIds = new Set(state.deck.map((item) => item.id));
   state.selectedDeckIds = new Set([...state.selectedDeckIds].filter((id) => deckIds.has(id)));
+
+  if (state.editingDeckItemId && !deckIds.has(state.editingDeckItemId)) {
+    exitDeckEditMode();
+    el.sourceText.value = "";
+    resetTranslateOutputs();
+    updateClearSourceTextButtonState();
+  }
 }
 
 function updateDeckToolbarState() {
-  const hasSelection = state.selectedDeckIds.size > 0;
+  const selectedCount = state.selectedDeckIds.size;
+  const hasSelection = selectedCount > 0;
   const hasClipboard = state.deckClipboard.length > 0;
   const hasDeckItems = state.deck.length > 0;
 
   el.deckDeleteToolbarBtn.disabled = !hasSelection;
-  el.deckCutToolbarBtn.disabled = !hasSelection;
+  el.deckModifyToolbarBtn.disabled = selectedCount !== 1;
   el.deckPasteToolbarBtn.disabled = !hasClipboard;
   el.exportDeckBtn.disabled = !hasDeckItems;
+}
+
+function editSelectedDeckItem() {
+  if (state.selectedDeckIds.size !== 1) {
+    setStatus("Select exactly one card to modify.", true);
+    return;
+  }
+
+  const [selectedId] = [...state.selectedDeckIds];
+  const selectedItem = state.deck.find((item) => item.id === selectedId);
+  if (!selectedItem) {
+    setStatus("The selected card could not be found.", true);
+    return;
+  }
+
+  enterDeckEditMode(selectedItem);
+  setStatus("Editing selected deck item.");
 }
 
 async function persistDeckState() {
@@ -1723,23 +1886,18 @@ async function deleteSelectedDeckItems() {
   const selectedCount = state.selectedDeckIds.size;
   if (!selectedCount) return;
 
+  const editingItemDeleted = isEditingDeckItem() && state.selectedDeckIds.has(state.editingDeckItemId);
   state.deck = sortDeckItemsByNewest(state.deck.filter((item) => !state.selectedDeckIds.has(item.id)));
   state.selectedDeckIds.clear();
+  if (editingItemDeleted) {
+    exitDeckEditMode();
+    el.sourceText.value = "";
+    resetTranslateOutputs();
+    updateClearSourceTextButtonState();
+  }
   pruneDeckSelection();
   await persistDeckState();
   setStatus(`${formatItemCountLabel(selectedCount)} deleted.`);
-}
-
-async function cutSelectedDeckItems() {
-  const selectedItems = state.deck.filter((item) => state.selectedDeckIds.has(item.id));
-  if (!selectedItems.length) return;
-
-  state.deckClipboard = selectedItems.map((item) => ({ ...item }));
-  state.deck = sortDeckItemsByNewest(state.deck.filter((item) => !state.selectedDeckIds.has(item.id)));
-  state.selectedDeckIds.clear();
-  pruneDeckSelection();
-  await persistDeckState();
-  setStatus(`${formatItemCountLabel(selectedItems.length)} cut.`);
 }
 
 async function pasteDeckItems() {
@@ -1827,6 +1985,13 @@ async function applyHighlightToCurrentTab() {
 }
 
 function focusTranslateInputForManualAdd() {
+  if (isEditingDeckItem()) {
+    exitDeckEditMode();
+    el.sourceText.value = "";
+    resetTranslateOutputs();
+    updateClearSourceTextButtonState();
+  }
+
   switchTab("translate");
   window.setTimeout(() => {
     el.sourceText.focus();
@@ -1858,8 +2023,10 @@ function bindEvents() {
   el.synonymPrevPageBtn.addEventListener("click", () => goToSynonymPage(state.thesaurusPage - 1));
   el.synonymNextPageBtn.addEventListener("click", () => goToSynonymPage(state.thesaurusPage + 1));
   el.swapLangBtn.addEventListener("click", swapSelectedLanguages);
+  el.clearSourceTextBtn.addEventListener("click", clearSourceText);
 
   el.sourceText.addEventListener("input", handleTranslateInputsChanged);
+  el.translatedText.addEventListener("input", handleTranslatedTextChanged);
   el.sourceText.addEventListener("keydown", handleSourceTextKeyDown);
   el.sourceLang.addEventListener("change", () => {
     updateSwapLanguageButtonState();
@@ -1872,7 +2039,7 @@ function bindEvents() {
 
   el.deckAddManualBtn.addEventListener("click", () => handleDeckToolbarAction("add-manual"));
   bindAsyncEvent(el.deckDeleteToolbarBtn, "click", deleteSelectedDeckItems, "Could not delete deck items.");
-  bindAsyncEvent(el.deckCutToolbarBtn, "click", cutSelectedDeckItems, "Could not cut deck items.");
+  bindAsyncEvent(el.deckModifyToolbarBtn, "click", editSelectedDeckItem, "Could not load deck item for editing.");
   bindAsyncEvent(el.deckPasteToolbarBtn, "click", pasteDeckItems, "Could not paste deck items.");
   el.deckSearch.addEventListener("input", () => {
     state.deckPage = 1;
@@ -1971,7 +2138,10 @@ function bindEvents() {
 async function init() {
   await initializeDatabase();
   renderLanguages();
+  setTranslatedTextEditable(false);
+  updateSaveButtonLabel();
   resetTranslateOutputs();
+  updateClearSourceTextButtonState();
   el.deckSort.value = state.deckSort;
   bindEvents();
   updateDeckToolbarState();
