@@ -5,8 +5,10 @@
   "version": "0.1.0",
   "permissions": [
     "storage",
+    "tabs",
     "activeTab",
-    "scripting"
+    "scripting",
+    "contextMenus"
   ],
   "host_permissions": [
     "https://translation.googleapis.com/*",

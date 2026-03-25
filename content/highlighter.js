@@ -10,6 +10,7 @@ const INLINE_POPUP_TARGET_LINE_COUNT = 4;
 const INLINE_POPUP_MIN_WIDTH = 188;
 const INLINE_POPUP_MAX_WIDTH = 560;
 const INLINE_POPUP_MIN_BOX_WIDTH = 68;
+const SUPPORTED_HIGHLIGHT_PAGE_PROTOCOLS = new Set(["http:", "https:", "file:"]);
 
 let lastSelectedText = "";
 let tooltipElement = null;
@@ -87,6 +88,23 @@ function normalizeHighlightBlockedUrlRule(value) {
   }
 }
 
+function normalizeHighlightPageUrl(value) {
+  const rawValue = String(value ?? "").trim();
+  if (!rawValue) return "";
+
+  try {
+    const url = new URL(rawValue);
+    if (!SUPPORTED_HIGHLIGHT_PAGE_PROTOCOLS.has(url.protocol)) {
+      return "";
+    }
+
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
 function isHighlightBlockedOnCurrentPage(rules) {
   if (!Array.isArray(rules) || !rules.length) return false;
 
@@ -109,6 +127,19 @@ function isHighlightBlockedOnCurrentPage(rules) {
 
     return currentHost === normalizedRule || currentHost.endsWith(`.${normalizedRule}`);
   });
+}
+
+function getHighlightPageOverrideForCurrentPage(overrides) {
+  const pageUrl = normalizeHighlightPageUrl(window.location.href);
+  if (!pageUrl || !overrides || typeof overrides !== "object" || Array.isArray(overrides)) {
+    return null;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(overrides, pageUrl)) {
+    return null;
+  }
+
+  return typeof overrides[pageUrl] === "boolean" ? overrides[pageUrl] : null;
 }
 
 function createInlinePopupState() {
@@ -1269,15 +1300,15 @@ async function runHighlight(options = {}) {
   const resolvedSettings =
     settings ||
     (await withExtensionContext(
-      () => chrome.storage.local.get(["highlightEnabled", "deckItems", "highlightBlockedUrls"]),
+      () => chrome.storage.local.get(["highlightEnabled", "deckItems", "highlightBlockedUrls", "highlightPageOverrides"]),
       null
     ));
   if (!resolvedSettings) return false;
   if (runId !== activeHighlightRunId) return false;
 
-  const enabled =
-    resolvedSettings.highlightEnabled !== false &&
-    !isHighlightBlockedOnCurrentPage(resolvedSettings.highlightBlockedUrls || []);
+  const pageOverride = getHighlightPageOverrideForCurrentPage(resolvedSettings.highlightPageOverrides);
+  const enabledByRule = !isHighlightBlockedOnCurrentPage(resolvedSettings.highlightBlockedUrls || []);
+  const enabled = resolvedSettings.highlightEnabled !== false && (pageOverride === null ? enabledByRule : pageOverride);
   const nextModel = buildHighlightModel(resolvedSettings.deckItems || []);
   const nextCache = {
     enabled,
@@ -1339,7 +1370,7 @@ function handleStorageChange(changes, area) {
   if (!ensureExtensionContext()) return;
 
   if (area !== "local") return;
-  if (changes.deckItems || changes.highlightEnabled || changes.highlightBlockedUrls) {
+  if (changes.deckItems || changes.highlightEnabled || changes.highlightBlockedUrls || changes.highlightPageOverrides) {
     scheduleHighlightRun();
   }
 }
