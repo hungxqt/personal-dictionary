@@ -115,6 +115,7 @@ const el = {
   addHighlightBlockUrlBtn: document.getElementById("addHighlightBlockUrlBtn"),
   highlightBlockUrlList: document.getElementById("highlightBlockUrlList"),
   applyHighlightToTabBtn: document.getElementById("applyHighlightToTabBtn"),
+  settingsToast: document.getElementById("settingsToast"),
   saveToast: document.getElementById("saveToast"),
   status: document.getElementById("status")
 };
@@ -122,6 +123,7 @@ const el = {
 let popupContextAvailable = true;
 let popupResizeFrame = 0;
 let saveToastTimeoutId = 0;
+let settingsToastTimeoutId = 0;
 
 function isExtensionContextInvalidatedError(error) {
   const message = error?.message || String(error || "");
@@ -138,6 +140,42 @@ function hasLivePopupContext() {
 
 function invalidatePopupContext() {
   popupContextAvailable = false;
+}
+
+function getActivePopupTabName() {
+  return document.querySelector(".tab-btn.active")?.dataset.tab || "";
+}
+
+function hideSettingsToast() {
+  if (!el.settingsToast) return;
+
+  window.clearTimeout(settingsToastTimeoutId);
+  el.settingsToast.classList.remove("visible");
+  el.settingsToast.classList.remove("error");
+  el.settingsToast.hidden = true;
+}
+
+function showSettingsToast(message, isError = false) {
+  if (!el.settingsToast) return;
+
+  window.clearTimeout(settingsToastTimeoutId);
+  el.settingsToast.textContent = message;
+  el.settingsToast.hidden = false;
+  el.settingsToast.classList.toggle("error", isError);
+
+  window.requestAnimationFrame(() => {
+    el.settingsToast.classList.add("visible");
+  });
+
+  settingsToastTimeoutId = window.setTimeout(() => {
+    el.settingsToast.classList.remove("visible");
+    window.setTimeout(() => {
+      if (!el.settingsToast.classList.contains("visible")) {
+        el.settingsToast.classList.remove("error");
+        el.settingsToast.hidden = true;
+      }
+    }, 180);
+  }, 2200);
 }
 
 async function withPopupContext(task, fallbackValue = null) {
@@ -159,7 +197,13 @@ async function withPopupContext(task, fallbackValue = null) {
 }
 
 function setStatus(message, isError = false) {
-  if (!popupContextAvailable || !el.status) return;
+  if (!popupContextAvailable) return;
+
+  if (getActivePopupTabName() === "settings") {
+    showSettingsToast(message, isError);
+  }
+
+  if (!el.status) return;
   el.status.textContent = message;
   el.status.style.color = isError ? "#b42318" : "#245f5a";
 }
@@ -966,6 +1010,10 @@ function switchTab(tabName) {
   el.tabPanels.forEach((panel) => {
     panel.classList.toggle("active", panel.id === `tab-${tabName}`);
   });
+
+  if (tabName !== "settings") {
+    hideSettingsToast();
+  }
 
   schedulePopupResize();
 }

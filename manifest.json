@@ -10,7 +10,7 @@
   ],
   "host_permissions": [
     "https://translation.googleapis.com/*",
-    "https://api.cognitive.microsofttranslator.com/*"
+    "https://www.dictionaryapi.com/*"
   ],
   "action": {
     "default_title": "Vocab Translator",
