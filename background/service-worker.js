@@ -77,7 +77,7 @@ async function saveInlineDeckItem({ sourceText, translatedText, sourceLang, targ
   });
   const nextDeck = [nextItem, ...existingItems];
 
-  await writeDeckItems(nextDeck);
+  await writeDeckItems(nextDeck, { allowStorageFallback: true });
   await chrome.storage.local.set({ deckItems: nextDeck });
 
   return nextItem;

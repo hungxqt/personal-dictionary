@@ -205,6 +205,25 @@
 
       <section class="tab-panel" id="tab-settings">
         <div class="setting-card">
+          <h3>Highlight</h3>
+          <div class="row inline">
+            <label class="switch">
+              <input type="checkbox" id="highlightEnabled" />
+              <span>Enable deck word and sentence highlight on web pages</span>
+            </label>
+          </div>
+          <div class="row">
+            <label for="highlightBlockUrlInput">Disable highlight on matching URLs</label>
+            <div class="highlight-block-input-row">
+              <input id="highlightBlockUrlInput" type="text" placeholder="example.com or https://example.com/path" />
+              <button id="addHighlightBlockUrlBtn" type="button">Add</button>
+            </div>
+            <div id="highlightBlockUrlList" class="highlight-block-list" aria-live="polite"></div>
+          </div>
+          <button id="applyHighlightToTabBtn">Apply to Current Tab</button>
+        </div>
+
+        <div class="setting-card">
           <h3>Translation Provider (Google)</h3>
           <p class="muted">Using Google Cloud Translation API (v2).</p>
           <div class="row">
@@ -244,26 +263,6 @@
           <p class="muted small">
             Note: browsers do not expose full OS paths for security. You can still pick a file in any folder.
           </p>
-        </div>
-
-        <div class="setting-card">
-          <h3>Highlight</h3>
-          <div class="row inline">
-            <label class="switch">
-              <input type="checkbox" id="highlightEnabled" />
-              <span>Enable deck word and sentence highlight on web pages</span>
-            </label>
-          </div>
-          <div class="row">
-            <label for="highlightBlockUrlInput">Disable highlight on matching URLs</label>
-            <p class="muted small">Enter a full URL prefix like <code>https://example.com/path</code> or a domain like <code>example.com</code>.</p>
-            <div class="highlight-block-input-row">
-              <input id="highlightBlockUrlInput" type="text" placeholder="example.com or https://example.com/path" />
-              <button id="addHighlightBlockUrlBtn" type="button">Add</button>
-            </div>
-            <div id="highlightBlockUrlList" class="highlight-block-list" aria-live="polite"></div>
-          </div>
-          <button id="applyHighlightToTabBtn">Apply to Current Tab</button>
         </div>
 
         <div id="settingsToast" class="settings-toast" role="status" aria-live="polite" hidden></div>
