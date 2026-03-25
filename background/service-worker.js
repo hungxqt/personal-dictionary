@@ -225,6 +225,22 @@ async function refreshHighlightForTab(tabId) {
   }
 }
 
+async function refreshHighlightForAllTabs() {
+  if (!chrome.tabs?.query) return;
+
+  try {
+    const tabs = await chrome.tabs.query({});
+    await Promise.all(
+      tabs
+        .map((tab) => tab.id)
+        .filter(Number.isInteger)
+        .map((tabId) => refreshHighlightForTab(tabId))
+    );
+  } catch {
+    // Ignore best-effort refresh failures across tabs.
+  }
+}
+
 async function updateHighlightContextMenuForActiveTab() {
   if (!chrome.tabs?.query) return;
 
@@ -315,7 +331,6 @@ async function saveInlineDeckItem({ sourceText, translatedText, sourceLang, targ
   const nextDeck = [nextItem, ...existingItems];
 
   await writeDeckItems(nextDeck, { allowStorageFallback: true });
-  await chrome.storage.local.set({ deckItems: nextDeck });
 
   return nextItem;
 }
@@ -348,7 +363,10 @@ if (chrome.contextMenus?.onShown?.addListener) {
 }
 
 if (chrome.tabs?.onActivated?.addListener) {
-  chrome.tabs.onActivated.addListener(() => {
+  chrome.tabs.onActivated.addListener((activeInfo) => {
+    refreshHighlightForTab(activeInfo.tabId).catch(() => {
+      // Ignore active-tab refresh failures.
+    });
     updateHighlightContextMenuForActiveTab().catch(() => {
       // Ignore active-tab menu sync failures.
     });
@@ -369,6 +387,12 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (!changes.highlightEnabled && !changes.highlightBlockedUrls && !changes[HIGHLIGHT_PAGE_OVERRIDES_KEY]) {
     return;
+  }
+
+  if (changes.highlightEnabled || changes.highlightBlockedUrls) {
+    refreshHighlightForAllTabs().catch(() => {
+      // Ignore storage-driven highlight refresh failures.
+    });
   }
 
   updateHighlightContextMenuForActiveTab().catch(() => {
@@ -439,7 +463,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sourceLang: message.sourceLang,
       targetLang: message.targetLang
     })
-      .then((item) => sendResponse({ ok: true, item }))
+      .then(async (item) => {
+        await refreshHighlightForTab(sender.tab?.id);
+        sendResponse({ ok: true, item });
+      })
       .catch((error) => sendResponse({ ok: false, error: error?.message || "Could not save deck item." }));
     return true;
   }

@@ -1,6 +1,7 @@
 const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "INPUT", "CODE", "PRE"]);
 const TEXT_INPUT_TYPES = new Set(["text", "search", "url", "tel", "password"]);
 const HIGHLIGHT_REFRESH_DELAY_MS = 80;
+const HIGHLIGHT_USER_IDLE_DELAY_MS = 220;
 const HIGHLIGHT_WALK_BATCH_SIZE = 250;
 const HIGHLIGHT_APPLY_BATCH_SIZE = 150;
 const SELECTION_SYNC_DELAY_MS = 120;
@@ -11,6 +12,9 @@ const INLINE_POPUP_MIN_WIDTH = 188;
 const INLINE_POPUP_MAX_WIDTH = 560;
 const INLINE_POPUP_MIN_BOX_WIDTH = 68;
 const SUPPORTED_HIGHLIGHT_PAGE_PROTOCOLS = new Set(["http:", "https:", "file:"]);
+const HIGHLIGHT_SELECTOR = "span.vocab-highlight";
+const EXTENSION_UI_SELECTOR = ".vocab-selection-bubble, .vocab-inline-translate-popup, .vocab-highlight-tooltip, .vocab-inline-measure";
+const EXTENSION_OWNED_SELECTOR = `${HIGHLIGHT_SELECTOR}, ${EXTENSION_UI_SELECTOR}`;
 
 let lastSelectedText = "";
 let tooltipElement = null;
@@ -34,17 +38,19 @@ let hasAppliedHighlights = false;
 let selectionBubbleText = "";
 let inlineTranslateRequestId = 0;
 let inlineSaveRequestId = 0;
-let highlightCache = {
-  enabled: null,
-  matchSignature: "",
-  tooltipSignature: "",
-  regex: null,
-  termMeanings: new Map()
-};
+let highlightCache = createEmptyHighlightCache();
 let inlinePopupState = createInlinePopupState();
 let extensionContextAvailable = true;
 const pageEventController = new AbortController();
 let inlinePopupMeasureElement = null;
+let highlightMutationObserver = null;
+let highlightMutationObserverPauseDepth = 0;
+let highlightUserInteractionUntil = 0;
+let highlightTextCompositionActive = false;
+let pendingInteractionDeferredHighlight = false;
+let pendingInteractionDeferredHighlightForce = false;
+let incrementalHighlightRefreshTimer = 0;
+let pendingIncrementalHighlightRoots = new Set();
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -142,6 +148,16 @@ function getHighlightPageOverrideForCurrentPage(overrides) {
   return typeof overrides[pageUrl] === "boolean" ? overrides[pageUrl] : null;
 }
 
+function createEmptyHighlightCache(enabled = null) {
+  return {
+    enabled,
+    matchSignature: "",
+    tooltipSignature: "",
+    regex: null,
+    termMeanings: new Map()
+  };
+}
+
 function createInlinePopupState() {
   return {
     sourceText: "",
@@ -174,6 +190,37 @@ function clearSelectionSync() {
   pendingSelectionText = "";
 }
 
+function removeInjectedElement(element) {
+  if (element?.isConnected) {
+    element.remove();
+  }
+
+  return null;
+}
+
+function removeInjectedUiElements() {
+  cancelSelectionUiPosition();
+  cancelTooltipPosition();
+  clearSelectionActionUpdate();
+
+  selectionBubbleElement = removeInjectedElement(selectionBubbleElement);
+  selectionPopupElement = removeInjectedElement(selectionPopupElement);
+  tooltipElement = removeInjectedElement(tooltipElement);
+  inlinePopupMeasureElement = removeInjectedElement(inlinePopupMeasureElement);
+
+  selectionPopupSourceElement = null;
+  selectionPopupMetaElement = null;
+  selectionPopupResultElement = null;
+  selectionPopupStatusElement = null;
+  selectionPopupSaveButton = null;
+}
+
+function removeStaleInjectedUiElements() {
+  document.querySelectorAll(EXTENSION_UI_SELECTOR).forEach((node) => {
+    node.remove();
+  });
+}
+
 function ensureExtensionContext() {
   if (hasLiveExtensionContext()) return true;
 
@@ -183,7 +230,6 @@ function ensureExtensionContext() {
 
 function removeExtensionListeners() {
   try {
-    chrome.storage.onChanged.removeListener(handleStorageChange);
     chrome.runtime.onMessage.removeListener(handleRuntimeMessage);
   } catch {
     // Ignore stale context teardown failures.
@@ -197,9 +243,23 @@ function invalidateExtensionContext() {
   pageEventController.abort();
   removeExtensionListeners();
   clearScheduledHighlightRun();
+  highlightMutationObserverPauseDepth = 0;
+  disconnectHighlightMutationObserver();
+  highlightTextCompositionActive = false;
+  pendingInteractionDeferredHighlight = false;
+  pendingInteractionDeferredHighlightForce = false;
+  clearScheduledIncrementalHighlightRun();
+  pendingIncrementalHighlightRoots = new Set();
   clearSelectionSync();
   hideSelectionActionUi();
   hideTooltip();
+  unwrapHighlights({ force: true });
+  removeInjectedUiElements();
+  highlightCache = createEmptyHighlightCache(false);
+  lastSelectedText = "";
+  selectionBubbleText = "";
+  selectionUiAnchorRect = null;
+  inlinePopupState = createInlinePopupState();
 }
 
 async function withExtensionContext(task, fallbackValue = null) {
@@ -220,9 +280,49 @@ async function withExtensionContext(task, fallbackValue = null) {
   }
 }
 
-function isExtensionUiNode(node) {
+function getExtensionOwnedElement(node) {
   const element = node instanceof Element ? node : node?.parentElement;
-  return !!element?.closest(".vocab-selection-bubble, .vocab-inline-translate-popup, .vocab-highlight-tooltip");
+  return element?.closest(EXTENSION_OWNED_SELECTOR) || null;
+}
+
+function isExtensionOwnedNode(node) {
+  return !!getExtensionOwnedElement(node);
+}
+
+function isEditableElement(element) {
+  if (!(element instanceof HTMLElement)) return false;
+
+  if (element instanceof HTMLTextAreaElement) return true;
+  if (element instanceof HTMLInputElement) {
+    return TEXT_INPUT_TYPES.has(element.type);
+  }
+
+  if (element.isContentEditable) return true;
+
+  const role = element.getAttribute("role");
+  return role === "textbox" || role === "searchbox";
+}
+
+function getEditableContainer(node) {
+  let element = node instanceof Element ? node : node?.parentElement;
+  while (element) {
+    if (isEditableElement(element)) {
+      return element;
+    }
+
+    element = element.parentElement;
+  }
+
+  return null;
+}
+
+function isEditableNode(node) {
+  return !!getEditableContainer(node);
+}
+
+function isExtensionUiNode(node) {
+  const ownedElement = getExtensionOwnedElement(node);
+  return !!ownedElement && !ownedElement.classList.contains("vocab-highlight");
 }
 
 function capturePageRect(rect) {
@@ -313,6 +413,43 @@ function getCurrentSelectedText() {
   return getSelectedTextFromActiveElement() || window.getSelection?.()?.toString?.().trim?.() || "";
 }
 
+function markHighlightUserInteraction(durationMs = HIGHLIGHT_USER_IDLE_DELAY_MS) {
+  highlightUserInteractionUntil = Date.now() + Math.max(durationMs, 0);
+}
+
+function hasActivePageSelection() {
+  const selection = window.getSelection?.();
+  return !!selection && selection.rangeCount > 0 && !selection.isCollapsed;
+}
+
+function shouldDeferHighlightForUserInteraction() {
+  if (highlightTextCompositionActive) return true;
+  if (Date.now() < highlightUserInteractionUntil) return true;
+  if (hasActivePageSelection()) return true;
+  return false;
+}
+
+function queueHighlightAfterInteraction(force = false) {
+  pendingInteractionDeferredHighlight = true;
+  pendingInteractionDeferredHighlightForce = pendingInteractionDeferredHighlightForce || force;
+}
+
+function flushQueuedHighlightAfterInteraction() {
+  if (shouldDeferHighlightForUserInteraction()) return;
+
+  if (pendingInteractionDeferredHighlight) {
+    const force = pendingInteractionDeferredHighlightForce;
+    pendingInteractionDeferredHighlight = false;
+    pendingInteractionDeferredHighlightForce = false;
+    clearScheduledIncrementalHighlightRun();
+    pendingIncrementalHighlightRoots = new Set();
+    scheduleHighlightRun({ force });
+    return;
+  }
+
+  flushPendingIncrementalHighlightRun();
+}
+
 async function flushSelectionSync() {
   const selectedText = pendingSelectionText;
   clearSelectionSync();
@@ -333,7 +470,11 @@ function rememberCurrentSelection() {
   if (!ensureExtensionContext()) return;
 
   const selectedText = getCurrentSelectedText();
-  if (!selectedText || selectedText === lastSelectedText) return;
+  if (!selectedText) {
+    lastSelectedText = "";
+    return;
+  }
+  if (selectedText === lastSelectedText) return;
 
   lastSelectedText = selectedText;
   scheduleSelectionSync(selectedText);
@@ -466,6 +607,7 @@ function ensureInlinePopupMeasureElement() {
   if (inlinePopupMeasureElement?.isConnected) return inlinePopupMeasureElement;
 
   inlinePopupMeasureElement = document.createElement("div");
+  inlinePopupMeasureElement.className = "vocab-inline-measure";
   inlinePopupMeasureElement.hidden = true;
   inlinePopupMeasureElement.setAttribute("aria-hidden", "true");
   inlinePopupMeasureElement.style.position = "fixed";
@@ -543,6 +685,7 @@ function measureInlinePopupParagraphWidth(referenceElement, text, minWidth, maxW
   }
 
   measureElement.hidden = true;
+  measureElement.textContent = "";
   return Math.min(Math.max(best, minWidth), maxWidth);
 }
 
@@ -1173,22 +1316,287 @@ function bindTooltipEvents() {
   );
 }
 
-function unwrapHighlights() {
-  hideTooltip();
+function bindHighlightInteractionEvents() {
+  const listenerOptions = { signal: pageEventController.signal };
 
-  if (!hasAppliedHighlights) return;
+  const markIfEditableInteraction = (event) => {
+    if (!ensureExtensionContext()) return;
 
-  const nodes = document.querySelectorAll("span.vocab-highlight");
-  nodes.forEach((node) => {
+    const target = event.target instanceof Node ? event.target : document.activeElement;
+    if (!isEditableNode(target)) return;
+
+    markHighlightUserInteraction();
+  };
+
+  document.addEventListener("selectionchange", () => {
+    if (!ensureExtensionContext()) return;
+    if (hasActivePageSelection()) return;
+
+    flushQueuedHighlightAfterInteraction();
+  }, listenerOptions);
+  document.addEventListener("keydown", markIfEditableInteraction, listenerOptions);
+  document.addEventListener("beforeinput", markIfEditableInteraction, listenerOptions);
+  document.addEventListener("input", markIfEditableInteraction, listenerOptions);
+  document.addEventListener("compositionstart", (event) => {
+    if (!ensureExtensionContext()) return;
+    if (!isEditableNode(event.target instanceof Node ? event.target : document.activeElement)) return;
+
+    highlightTextCompositionActive = true;
+    markHighlightUserInteraction();
+  }, listenerOptions);
+  document.addEventListener("compositionend", (event) => {
+    if (!ensureExtensionContext()) return;
+    if (!isEditableNode(event.target instanceof Node ? event.target : document.activeElement)) return;
+
+    highlightTextCompositionActive = false;
+    markHighlightUserInteraction();
+    queueHighlightAfterInteraction(true);
+    scheduleHighlightRun({ force: true });
+  }, listenerOptions);
+}
+
+function getHighlightNodesWithin(root) {
+  if (root instanceof Document) {
+    return [...root.querySelectorAll(HIGHLIGHT_SELECTOR)];
+  }
+  if (!(root instanceof Element)) {
+    return [];
+  }
+
+  const highlightNodes = [];
+  if (root.matches(HIGHLIGHT_SELECTOR)) {
+    highlightNodes.push(root);
+  }
+
+  highlightNodes.push(...root.querySelectorAll(HIGHLIGHT_SELECTOR));
+  return highlightNodes;
+}
+
+function replaceHighlightNodesWithText(highlightNodes) {
+  const parentNodes = new Set();
+
+  highlightNodes.forEach((node) => {
+    const parentNode = node.parentNode;
+    if (!parentNode) return;
+
+    parentNodes.add(parentNode);
     const text = document.createTextNode(node.textContent || "");
     node.replaceWith(text);
   });
 
+  parentNodes.forEach((parentNode) => {
+    parentNode.normalize?.();
+  });
+}
+
+function hasHighlightNodes() {
+  return !!document.querySelector(HIGHLIGHT_SELECTOR);
+}
+
+function unwrapHighlights(options = {}) {
+  const { force = false } = options;
+  hideTooltip();
+
+  const nodes = getHighlightNodesWithin(document);
+  if (!nodes.length) {
+    hasAppliedHighlights = false;
+    return;
+  }
+
+  if (!force && !hasAppliedHighlights) {
+    hasAppliedHighlights = true;
+  }
+
+  replaceHighlightNodesWithText(nodes);
+
   hasAppliedHighlights = false;
+}
+
+function unwrapHighlightsWithin(root) {
+  const highlightNodes = getHighlightNodesWithin(root);
+  if (!highlightNodes.length) return;
+
+  hideTooltip();
+  replaceHighlightNodesWithText(highlightNodes);
 }
 
 function yieldToBrowser() {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
+function hasRelevantHighlightMutation(records) {
+  return records.some((record) => {
+    if (record.type === "characterData") {
+      return !isExtensionOwnedNode(record.target) && !isEditableNode(record.target);
+    }
+
+    if (record.type !== "childList") {
+      return false;
+    }
+
+    const changedNodes = [...record.addedNodes, ...record.removedNodes];
+    return changedNodes.some((node) => !isExtensionOwnedNode(node) && !isEditableNode(node));
+  });
+}
+
+function getIncrementalHighlightRoot(node) {
+  let root = node instanceof Element ? node : node?.parentElement;
+  if (!root) return null;
+  if (root === document.documentElement) {
+    root = document.body;
+  }
+  if (!root || !document.body?.contains(root)) return null;
+  if (isExtensionOwnedNode(root) || isEditableNode(root)) return null;
+
+  return root;
+}
+
+function normalizeIncrementalHighlightRoots(roots) {
+  const normalizedRoots = [];
+
+  for (const candidate of roots) {
+    const root = getIncrementalHighlightRoot(candidate);
+    if (!root) continue;
+
+    if (normalizedRoots.some((existingRoot) => existingRoot === root || existingRoot.contains(root))) {
+      continue;
+    }
+
+    for (let index = normalizedRoots.length - 1; index >= 0; index -= 1) {
+      const existingRoot = normalizedRoots[index];
+      if (root.contains(existingRoot)) {
+        normalizedRoots.splice(index, 1);
+      }
+    }
+
+    normalizedRoots.push(root);
+  }
+
+  return normalizedRoots;
+}
+
+function queueIncrementalHighlightRoots(roots) {
+  for (const root of normalizeIncrementalHighlightRoots(roots)) {
+    pendingIncrementalHighlightRoots.add(root);
+  }
+}
+
+function consumePendingIncrementalHighlightRoots() {
+  const roots = normalizeIncrementalHighlightRoots([...pendingIncrementalHighlightRoots]);
+  pendingIncrementalHighlightRoots = new Set();
+  return roots;
+}
+
+function collectIncrementalHighlightRoots(records) {
+  const roots = [];
+
+  for (const record of records) {
+    if (record.type === "characterData") {
+      roots.push(record.target);
+      continue;
+    }
+
+    if (record.type !== "childList") {
+      continue;
+    }
+
+    roots.push(record.target);
+
+    for (const node of record.addedNodes) {
+      roots.push(node);
+    }
+  }
+
+  return normalizeIncrementalHighlightRoots(roots);
+}
+
+function ensureHighlightMutationObserver() {
+  if (highlightMutationObserver) return highlightMutationObserver;
+
+  highlightMutationObserver = new MutationObserver((records) => {
+    if (!ensureExtensionContext()) return;
+    if (activeTooltipTarget && !activeTooltipTarget.isConnected) {
+      hideTooltip();
+    }
+    if (highlightCache.enabled === false || !highlightCache.regex) return;
+    if (!hasRelevantHighlightMutation(records)) return;
+
+    scheduleIncrementalHighlightRun(collectIncrementalHighlightRoots(records));
+  });
+
+  return highlightMutationObserver;
+}
+
+function disconnectHighlightMutationObserver() {
+  highlightMutationObserver?.disconnect();
+}
+
+function shouldObserveHighlightMutations() {
+  return hasLiveExtensionContext() && highlightCache.enabled === true && !!highlightCache.regex;
+}
+
+function connectHighlightMutationObserver() {
+  if (!document.body || highlightMutationObserverPauseDepth > 0 || !shouldObserveHighlightMutations()) {
+    disconnectHighlightMutationObserver();
+    return;
+  }
+
+  const observer = ensureHighlightMutationObserver();
+  observer.disconnect();
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true
+  });
+}
+
+function suspendHighlightMutationObserver() {
+  highlightMutationObserverPauseDepth += 1;
+  if (highlightMutationObserverPauseDepth === 1) {
+    disconnectHighlightMutationObserver();
+  }
+}
+
+function resumeHighlightMutationObserver() {
+  if (highlightMutationObserverPauseDepth === 0) return;
+
+  highlightMutationObserverPauseDepth -= 1;
+  if (highlightMutationObserverPauseDepth === 0 && shouldObserveHighlightMutations()) {
+    connectHighlightMutationObserver();
+  }
+}
+
+async function collectMatchingTextNodesWithin(root, regex, runId) {
+  if (!(root instanceof Element) || !document.body?.contains(root)) return [];
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  let scannedNodes = 0;
+
+  while (walker.nextNode()) {
+    if (runId !== activeHighlightRunId) return null;
+    scannedNodes += 1;
+
+    const node = walker.currentNode;
+    const parent = node.parentElement;
+    if (!parent) continue;
+    if (SKIP_TAGS.has(parent.tagName)) continue;
+    if (parent.classList?.contains("vocab-highlight")) continue;
+    if (isEditableNode(node)) continue;
+
+    const nodeValue = node.nodeValue || "";
+    regex.lastIndex = 0;
+    if (!nodeValue || !regex.test(nodeValue)) continue;
+
+    regex.lastIndex = 0;
+    textNodes.push(node);
+
+    if (scannedNodes % HIGHLIGHT_WALK_BATCH_SIZE === 0) {
+      await yieldToBrowser();
+    }
+  }
+
+  return textNodes;
 }
 
 async function collectMatchingTextNodes(regex, runId) {
@@ -1207,6 +1615,7 @@ async function collectMatchingTextNodes(regex, runId) {
     if (!parent) continue;
     if (SKIP_TAGS.has(parent.tagName)) continue;
     if (parent.classList?.contains("vocab-highlight")) continue;
+    if (isEditableNode(node)) continue;
 
     const nodeValue = node.nodeValue || "";
     regex.lastIndex = 0;
@@ -1221,6 +1630,47 @@ async function collectMatchingTextNodes(regex, runId) {
   }
 
   return textNodes;
+}
+
+async function runIncrementalHighlight(roots) {
+  if (!ensureExtensionContext()) return false;
+  if (shouldDeferHighlightForUserInteraction()) {
+    scheduleIncrementalHighlightRun(roots);
+    return false;
+  }
+  if (highlightCache.enabled !== true || !highlightCache.regex) {
+    return false;
+  }
+
+  const normalizedRoots = normalizeIncrementalHighlightRoots(roots);
+  if (!normalizedRoots.length) return false;
+
+  suspendHighlightMutationObserver();
+
+  try {
+    const runId = ++activeHighlightRunId;
+    let appliedAnyHighlights = false;
+
+    for (const root of normalizedRoots) {
+      if (runId !== activeHighlightRunId) return false;
+      if (!document.body?.contains(root)) continue;
+
+      unwrapHighlightsWithin(root);
+
+      const textNodes = await collectMatchingTextNodesWithin(root, highlightCache.regex, runId);
+      if (!textNodes || runId !== activeHighlightRunId) return false;
+
+      const appliedHighlights = await applyHighlightsToTextNodes(textNodes, highlightCache.regex, runId);
+      if (runId !== activeHighlightRunId) return false;
+
+      appliedAnyHighlights = appliedAnyHighlights || appliedHighlights;
+    }
+
+    hasAppliedHighlights = hasHighlightNodes();
+    return appliedAnyHighlights;
+  } finally {
+    resumeHighlightMutationObserver();
+  }
 }
 
 async function applyHighlightsToTextNodes(textNodes, regex, runId) {
@@ -1278,12 +1728,85 @@ function clearScheduledHighlightRun() {
   }
 }
 
+function clearScheduledIncrementalHighlightRun() {
+  if (incrementalHighlightRefreshTimer) {
+    clearTimeout(incrementalHighlightRefreshTimer);
+    incrementalHighlightRefreshTimer = 0;
+  }
+}
+
+function flushPendingIncrementalHighlightRun() {
+  if (pendingInteractionDeferredHighlight) {
+    pendingIncrementalHighlightRoots = new Set();
+    return;
+  }
+
+  if (shouldDeferHighlightForUserInteraction()) {
+    if (pendingIncrementalHighlightRoots.size && !hasActivePageSelection()) {
+      clearScheduledIncrementalHighlightRun();
+      incrementalHighlightRefreshTimer = window.setTimeout(() => {
+        incrementalHighlightRefreshTimer = 0;
+        flushQueuedHighlightAfterInteraction();
+      }, HIGHLIGHT_USER_IDLE_DELAY_MS);
+    }
+    return;
+  }
+
+  const roots = consumePendingIncrementalHighlightRoots();
+  if (!roots.length) return;
+
+  runIncrementalHighlight(roots).catch(() => {
+    // Ignore incremental highlight refresh failures to avoid breaking the host page.
+  });
+}
+
+function scheduleIncrementalHighlightRun(roots = []) {
+  queueIncrementalHighlightRoots(roots);
+  if (!pendingIncrementalHighlightRoots.size) return;
+  if (pendingInteractionDeferredHighlight) return;
+
+  clearScheduledIncrementalHighlightRun();
+
+  if (shouldDeferHighlightForUserInteraction()) {
+    if (!hasActivePageSelection()) {
+      incrementalHighlightRefreshTimer = window.setTimeout(() => {
+        incrementalHighlightRefreshTimer = 0;
+        flushQueuedHighlightAfterInteraction();
+      }, HIGHLIGHT_USER_IDLE_DELAY_MS);
+    }
+    return;
+  }
+
+  incrementalHighlightRefreshTimer = window.setTimeout(() => {
+    incrementalHighlightRefreshTimer = 0;
+    flushPendingIncrementalHighlightRun();
+  }, HIGHLIGHT_REFRESH_DELAY_MS);
+}
+
 function scheduleHighlightRun(options = {}) {
   const { force = false } = options;
-  clearScheduledHighlightRun();
+  clearScheduledIncrementalHighlightRun();
+  pendingIncrementalHighlightRoots = new Set();
 
+  if (shouldDeferHighlightForUserInteraction()) {
+    queueHighlightAfterInteraction(force);
+    clearScheduledHighlightRun();
+
+    if (!hasActivePageSelection()) {
+      highlightRefreshTimer = window.setTimeout(() => {
+        highlightRefreshTimer = 0;
+        flushQueuedHighlightAfterInteraction();
+      }, HIGHLIGHT_USER_IDLE_DELAY_MS);
+    }
+    return;
+  }
+
+  clearScheduledHighlightRun();
   highlightRefreshTimer = window.setTimeout(() => {
     highlightRefreshTimer = 0;
+    pendingInteractionDeferredHighlight = false;
+    pendingInteractionDeferredHighlightForce = false;
+
     runHighlight({ force }).catch(() => {
       // Ignore highlight refresh failures to avoid breaking the host page.
     });
@@ -1294,86 +1817,105 @@ async function runHighlight(options = {}) {
   if (!ensureExtensionContext()) return false;
 
   const { force = false, settings } = options;
-  clearScheduledHighlightRun();
-
-  const runId = ++activeHighlightRunId;
-  const resolvedSettings =
-    settings ||
-    (await withExtensionContext(
-      () => chrome.storage.local.get(["highlightEnabled", "deckItems", "highlightBlockedUrls", "highlightPageOverrides"]),
-      null
-    ));
-  if (!resolvedSettings) return false;
-  if (runId !== activeHighlightRunId) return false;
-
-  const pageOverride = getHighlightPageOverrideForCurrentPage(resolvedSettings.highlightPageOverrides);
-  const enabledByRule = !isHighlightBlockedOnCurrentPage(resolvedSettings.highlightBlockedUrls || []);
-  const enabled = resolvedSettings.highlightEnabled !== false && (pageOverride === null ? enabledByRule : pageOverride);
-  const nextModel = buildHighlightModel(resolvedSettings.deckItems || []);
-  const nextCache = {
-    enabled,
-    matchSignature: nextModel.matchSignature,
-    tooltipSignature: nextModel.tooltipSignature,
-    regex: nextModel.regex,
-    termMeanings: nextModel.termMeanings
-  };
-
-  const enabledChanged = enabled !== highlightCache.enabled;
-  const matchSignatureChanged = nextCache.matchSignature !== highlightCache.matchSignature;
-  const tooltipSignatureChanged = nextCache.tooltipSignature !== highlightCache.tooltipSignature;
-
-  highlightCache = nextCache;
-
-  if (!enabled) {
-    if (enabledChanged || hasAppliedHighlights) {
-      unwrapHighlights();
-    }
+  if (shouldDeferHighlightForUserInteraction()) {
+    scheduleHighlightRun({ force });
     return false;
   }
 
-  if (!force && !enabledChanged && !matchSignatureChanged) {
-    if (tooltipSignatureChanged && activeTooltipTarget) {
-      showTooltip(activeTooltipTarget);
+  suspendHighlightMutationObserver();
+
+  try {
+    clearScheduledHighlightRun();
+    clearScheduledIncrementalHighlightRun();
+    pendingIncrementalHighlightRoots = new Set();
+
+    const runId = ++activeHighlightRunId;
+    const resolvedSettings =
+      settings ||
+      (await withExtensionContext(
+        () => chrome.storage.local.get(["highlightEnabled", "highlightBlockedUrls", "highlightPageOverrides"]),
+        null
+      ));
+    if (!resolvedSettings) return false;
+    if (runId !== activeHighlightRunId) return false;
+
+    const pageOverride = getHighlightPageOverrideForCurrentPage(resolvedSettings.highlightPageOverrides);
+    const enabledByRule = !isHighlightBlockedOnCurrentPage(resolvedSettings.highlightBlockedUrls || []);
+    const enabled = resolvedSettings.highlightEnabled !== false && (pageOverride === null ? enabledByRule : pageOverride);
+
+    const enabledChanged = enabled !== highlightCache.enabled;
+
+    if (!enabled) {
+      highlightCache = createEmptyHighlightCache(false);
+      if (enabledChanged || hasAppliedHighlights) {
+        unwrapHighlights();
+      }
+      disconnectHighlightMutationObserver();
+      return false;
     }
-    return hasAppliedHighlights;
+
+    const resolvedDeckData =
+      Array.isArray(settings?.deckItems)
+        ? { deckItems: settings.deckItems }
+        : await withExtensionContext(() => chrome.storage.local.get(["deckItems"]), null);
+    if (!resolvedDeckData) return false;
+    if (runId !== activeHighlightRunId) return false;
+
+    const nextModel = buildHighlightModel(resolvedDeckData.deckItems || []);
+    const nextCache = {
+      enabled,
+      matchSignature: nextModel.matchSignature,
+      tooltipSignature: nextModel.tooltipSignature,
+      regex: nextModel.regex,
+      termMeanings: nextModel.termMeanings
+    };
+
+    const matchSignatureChanged = nextCache.matchSignature !== highlightCache.matchSignature;
+    const tooltipSignatureChanged = nextCache.tooltipSignature !== highlightCache.tooltipSignature;
+
+    highlightCache = nextCache;
+
+    if (!force && !enabledChanged && !matchSignatureChanged) {
+      if (tooltipSignatureChanged && activeTooltipTarget) {
+        showTooltip(activeTooltipTarget);
+      }
+      return hasAppliedHighlights;
+    }
+
+    unwrapHighlights();
+
+    if (!nextCache.regex) {
+      disconnectHighlightMutationObserver();
+      return false;
+    }
+
+    const textNodes = await collectMatchingTextNodes(nextCache.regex, runId);
+    if (!textNodes || runId !== activeHighlightRunId) return false;
+
+    const appliedHighlights = await applyHighlightsToTextNodes(textNodes, nextCache.regex, runId);
+    if (runId !== activeHighlightRunId) return false;
+
+    hasAppliedHighlights = appliedHighlights;
+    return appliedHighlights;
+  } finally {
+    resumeHighlightMutationObserver();
   }
-
-  unwrapHighlights();
-
-  if (!nextCache.regex) {
-    return false;
-  }
-
-  const textNodes = await collectMatchingTextNodes(nextCache.regex, runId);
-  if (!textNodes || runId !== activeHighlightRunId) return false;
-
-  const appliedHighlights = await applyHighlightsToTextNodes(textNodes, nextCache.regex, runId);
-  if (runId !== activeHighlightRunId) return false;
-
-  hasAppliedHighlights = appliedHighlights;
-  return appliedHighlights;
 }
 
+removeStaleInjectedUiElements();
+unwrapHighlights({ force: true });
 runHighlight().catch(() => {
   // Ignore initial highlight failures to avoid breaking the host page.
 });
 bindTooltipEvents();
 bindSelectionActionEvents();
+bindHighlightInteractionEvents();
 
 rememberCurrentSelection();
 const selectionSyncListenerOptions = { signal: pageEventController.signal };
 document.addEventListener("selectionchange", rememberCurrentSelection, selectionSyncListenerOptions);
 document.addEventListener("mouseup", rememberCurrentSelection, selectionSyncListenerOptions);
 document.addEventListener("keyup", rememberCurrentSelection, selectionSyncListenerOptions);
-
-function handleStorageChange(changes, area) {
-  if (!ensureExtensionContext()) return;
-
-  if (area !== "local") return;
-  if (changes.deckItems || changes.highlightEnabled || changes.highlightBlockedUrls || changes.highlightPageOverrides) {
-    scheduleHighlightRun();
-  }
-}
 
 function handleRuntimeMessage(message, _sender, sendResponse) {
   if (!ensureExtensionContext()) return false;
@@ -1394,5 +1936,4 @@ function handleRuntimeMessage(message, _sender, sendResponse) {
   return false;
 }
 
-chrome.storage.onChanged.addListener(handleStorageChange);
 chrome.runtime.onMessage.addListener(handleRuntimeMessage);

@@ -1083,17 +1083,50 @@ async function chooseDeckImportFile() {
   }
 
   return await new Promise((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      el.deckImportInput.removeEventListener("change", handleChange);
+      el.deckImportInput.removeEventListener("cancel", handleCancel);
+      window.removeEventListener("focus", handleWindowFocus, true);
+    };
+
+    const settle = (callback) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+
     const handleChange = () => {
       const [file] = el.deckImportInput.files || [];
       el.deckImportInput.value = "";
       if (file) {
-        resolve(file);
+        settle(() => resolve(file));
       } else {
-        reject(new DOMException("The user aborted a request.", "AbortError"));
+        settle(() => reject(new DOMException("The user aborted a request.", "AbortError")));
       }
     };
 
-    el.deckImportInput.addEventListener("change", handleChange, { once: true });
+    const handleCancel = () => {
+      el.deckImportInput.value = "";
+      settle(() => reject(new DOMException("The user aborted a request.", "AbortError")));
+    };
+
+    const handleWindowFocus = () => {
+      window.setTimeout(() => {
+        if (settled) return;
+        const [file] = el.deckImportInput.files || [];
+        if (file) return;
+
+        el.deckImportInput.value = "";
+        settle(() => reject(new DOMException("The user aborted a request.", "AbortError")));
+      }, 0);
+    };
+
+    el.deckImportInput.addEventListener("change", handleChange);
+    el.deckImportInput.addEventListener("cancel", handleCancel);
+    window.addEventListener("focus", handleWindowFocus, true);
     el.deckImportInput.value = "";
     el.deckImportInput.click();
   });
@@ -1293,6 +1326,35 @@ async function getActiveTab() {
   const tabs = await withPopupContext(() => chrome.tabs.query({ active: true, lastFocusedWindow: true }), []);
   const [tab] = tabs;
   return tab || null;
+}
+
+async function refreshHighlightInActiveTab(options = {}) {
+  const { showSuccessStatus = false, showFailureStatus = false } = options;
+  const tab = await getActiveTab();
+  if (!tab?.id) {
+    if (showFailureStatus) {
+      setStatus("No active tab found.", true);
+    }
+    return false;
+  }
+
+  try {
+    const response = await withPopupContext(() => chrome.tabs.sendMessage(tab.id, { type: "refresh-highlight" }), null);
+    if (!popupContextAvailable) return false;
+    if (!response?.ok) {
+      throw new Error("Open a normal webpage tab first, then try again.");
+    }
+
+    if (showSuccessStatus) {
+      setStatus("Applied highlight refresh to current tab.");
+    }
+    return true;
+  } catch {
+    if (showFailureStatus) {
+      setStatus("Open a normal webpage tab first, then try again.", true);
+    }
+    return false;
+  }
 }
 
 async function getSelectedTextFromActiveTab(tabId) {
@@ -2092,7 +2154,7 @@ async function saveCurrentTranslation() {
     );
     state.selectedDeckIds = new Set([updatedItem.id]);
     await writeDeckItems(state.deck);
-    await withPopupContext(() => chrome.storage.local.set({ deckItems: state.deck }), null);
+    await refreshHighlightInActiveTab();
     if (!popupContextAvailable) return;
 
     exitDeckEditMode();
@@ -2117,7 +2179,7 @@ async function saveCurrentTranslation() {
   state.deck = sortDeckItemsByNewest([item, ...state.deck]);
   state.deckPage = 1;
   await writeDeckItems(state.deck);
-  await withPopupContext(() => chrome.storage.local.set({ deckItems: state.deck }), null);
+  await refreshHighlightInActiveTab();
   if (!popupContextAvailable) return;
   renderDeck();
   resetFlashcardSession();
@@ -2168,7 +2230,7 @@ function editSelectedDeckItem() {
 
 async function persistDeckState() {
   await writeDeckItems(state.deck);
-  await withPopupContext(() => chrome.storage.local.set({ deckItems: state.deck }), null);
+  await refreshHighlightInActiveTab();
   if (!popupContextAvailable) return;
   renderDeck();
   resetFlashcardSession();
@@ -2300,22 +2362,7 @@ async function removeHighlightBlockedUrlRule(rule) {
 }
 
 async function applyHighlightToCurrentTab() {
-  const tab = await getActiveTab();
-  if (!tab?.id) {
-    setStatus("No active tab found.", true);
-    return;
-  }
-
-  try {
-    const response = await withPopupContext(() => chrome.tabs.sendMessage(tab.id, { type: "refresh-highlight" }), null);
-    if (!popupContextAvailable) return;
-    if (!response?.ok) {
-      throw new Error("Open a normal webpage tab first, then try again.");
-    }
-    setStatus("Applied highlight refresh to current tab.");
-  } catch {
-    setStatus("Open a normal webpage tab first, then try again.", true);
-  }
+  await refreshHighlightInActiveTab({ showSuccessStatus: true, showFailureStatus: true });
 }
 
 function focusTranslateInputForManualAdd() {
