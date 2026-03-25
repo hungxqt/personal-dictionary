@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Vocab Translator",
+  "description": "Translate text, save vocab to deck database.db, and highlight known words on web pages.",
+  "version": "0.1.0",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://translation.googleapis.com/*"
+  ],
+  "action": {
+    "default_title": "Vocab Translator",
+    "default_popup": "popup/popup.html"
+  },
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/highlighter.js"],
+      "css": ["content/highlighter.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "assets/icon-16.png",
+    "32": "assets/icon-32.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  }
+}

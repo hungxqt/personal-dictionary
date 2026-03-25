@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vocab Translator</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="app">
+      <nav class="tabs">
+        <button class="tab-btn active" data-tab="translate">Translate</button>
+        <button class="tab-btn" data-tab="deck">Deck</button>
+        <button class="tab-btn" data-tab="settings">Settings</button>
+      </nav>
+
+      <section class="tab-panel active" id="tab-translate">
+        <div class="row language-row">
+          <div class="language-field">
+            <label for="sourceLang">From</label>
+            <select id="sourceLang"></select>
+          </div>
+          <button id="swapLangBtn" class="swap-lang-btn" type="button" aria-label="Swap languages" title="Swap languages">
+            ⇄
+          </button>
+          <div class="language-field">
+            <label for="targetLang">To</label>
+            <select id="targetLang"></select>
+          </div>
+        </div>
+        <div class="row">
+          <textarea id="sourceText" placeholder="Type text to translate..."></textarea>
+        </div>
+        <div class="row actions">
+          <button id="translateBtn">Translate</button>
+          <button id="saveBtn" disabled>Save to Deck</button>
+        </div>
+        <div class="row">
+          <textarea id="translatedText" placeholder="Translation appears here..." readonly></textarea>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-deck">
+        <div class="deck-toolbar">
+          <div class="deck-icon-toolbar" aria-label="Deck actions">
+            <button
+              id="deckAddManualBtn"
+              class="deck-icon-btn"
+              type="button"
+              aria-label="Add card manually"
+              title="Add card manually"
+              data-tooltip="Add card manually"
+            >
+              <svg class="deck-toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+            <button
+              id="deckDeleteToolbarBtn"
+              class="deck-icon-btn"
+              type="button"
+              aria-label="Delete"
+              title="Delete"
+              data-tooltip="Delete"
+            >
+              <svg class="deck-toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 7h12M9 7V5h6v2M8 7l1 12h6l1-12M10 10v6M14 10v6" />
+              </svg>
+            </button>
+            <button
+              id="deckCutToolbarBtn"
+              class="deck-icon-btn"
+              type="button"
+              aria-label="Cut"
+              title="Cut"
+              data-tooltip="Cut"
+            >
+              <svg class="deck-toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 6l16 12M20 6L8.5 14.6M5.5 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM5.5 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" />
+              </svg>
+            </button>
+            <button
+              id="deckPasteToolbarBtn"
+              class="deck-icon-btn"
+              type="button"
+              aria-label="Paste"
+              title="Paste"
+              data-tooltip="Paste"
+            >
+              <svg class="deck-toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 4h6l1 2h3v14H5V6h3l1-2zM9 4v3h6V4" />
+              </svg>
+            </button>
+            <button
+              id="importDeckBtn"
+              class="deck-icon-btn"
+              type="button"
+              aria-label="Import"
+              title="Import"
+              data-tooltip="Import"
+            >
+              <svg class="deck-toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 4v10M8.5 10.5 12 14l3.5-3.5M5 18h14" />
+              </svg>
+            </button>
+            <button
+              id="exportDeckBtn"
+              class="deck-icon-btn"
+              type="button"
+              aria-label="Export"
+              title="Export"
+              data-tooltip="Export"
+            >
+              <svg class="deck-toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 20V10M8.5 13.5 12 10l3.5 3.5M5 6h14" />
+              </svg>
+            </button>
+          </div>
+          <select id="deckSort" aria-label="Sort deck items">
+            <option value="newest">New first</option>
+            <option value="oldest">Old first</option>
+            <option value="source-asc">A-Z</option>
+            <option value="source-desc">Z-A</option>
+          </select>
+          <button id="refreshDeckBtn">Refresh</button>
+          <input
+            id="deckImportInput"
+            type="file"
+            accept=".json,.csv,.txt,.text,application/json,text/csv,text/plain"
+            hidden
+          />
+          <div class="deck-search-pagination-row">
+            <input id="deckSearch" type="text" placeholder="Search in cards" />
+            <div class="deck-pagination" aria-label="Deck pagination">
+              <button id="deckPrevPageBtn" class="deck-page-btn" type="button" aria-label="Previous page">‹</button>
+              <span id="deckPaginationLabel" class="deck-pagination-label">0 - 0 of 0</span>
+              <button id="deckNextPageBtn" class="deck-page-btn" type="button" aria-label="Next page">›</button>
+            </div>
+          </div>
+        </div>
+        <div id="deckList" class="deck-list"></div>
+      </section>
+
+      <section class="tab-panel" id="tab-settings">
+        <div class="setting-card">
+          <h3>Translation Provider (Google)</h3>
+          <p class="muted">Using Google Cloud Translation API (v2).</p>
+          <div class="row">
+            <label for="googleApiKey">Google API Key</label>
+            <input id="googleApiKey" type="password" placeholder="AIza..." />
+          </div>
+          <div class="actions wrap">
+            <button id="saveApiKeyBtn">Save API Key</button>
+            <button id="clearApiKeyBtn">Clear API Key</button>
+          </div>
+        </div>
+
+        <div class="setting-card">
+          <h3>Database</h3>
+          <p class="muted">Deck is saved in <code>database.db</code>.</p>
+          <p><strong>Current location:</strong> <span id="dbLocationLabel">Loading...</span></p>
+          <div class="actions wrap">
+            <button id="useDefaultDbBtn">Use Default Location</button>
+            <button id="chooseDbBtn">Choose Another Location</button>
+          </div>
+          <p class="muted small">
+            Note: browsers do not expose full OS paths for security. You can still pick a file in any folder.
+          </p>
+        </div>
+
+        <div class="setting-card">
+          <h3>Highlight</h3>
+          <div class="row inline">
+            <label class="switch">
+              <input type="checkbox" id="highlightEnabled" />
+              <span>Enable deck word and sentence highlight on web pages</span>
+            </label>
+          </div>
+          <div class="row">
+            <label for="highlightBlockUrlInput">Disable highlight on matching URLs</label>
+            <p class="muted small">Enter a full URL prefix like <code>https://example.com/path</code> or a domain like <code>example.com</code>.</p>
+            <div class="highlight-block-input-row">
+              <input id="highlightBlockUrlInput" type="text" placeholder="example.com or https://example.com/path" />
+              <button id="addHighlightBlockUrlBtn" type="button">Add</button>
+            </div>
+            <div id="highlightBlockUrlList" class="highlight-block-list" aria-live="polite"></div>
+          </div>
+          <button id="applyHighlightToTabBtn">Apply to Current Tab</button>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
