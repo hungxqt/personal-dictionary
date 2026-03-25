@@ -29,10 +29,15 @@ const state = {
   deck: [],
   selectedDeckIds: new Set(),
   editingDeckItemId: "",
+  editingTranslationDraft: false,
   deckClipboard: [],
   deckSort: "newest",
   deckPage: 1,
   deckPageSize: 10,
+  flashcardOrderMode: "time-desc",
+  flashcardSequenceIds: [],
+  flashcardIndex: 0,
+  flashcardShowingMeaning: false,
   googleApiKey: "",
   merriamWebsterApiKey: "",
   highlightBlockedUrls: []
@@ -60,6 +65,7 @@ const DEFAULT_TRANSLATED_PLACEHOLDER = "Translation appears here...";
 const DEFAULT_THESAURUS_MESSAGE = "Translate text first, then click Synonyms or Antonyms.";
 const READY_THESAURUS_MESSAGE = "Click Synonyms or Antonyms to load suggestions.";
 const THESAURUS_TYPES = ["synonyms", "antonyms"];
+const FLASHCARD_ORDER_MODES = new Set(["random", "alpha-asc", "alpha-desc", "time-desc", "time-asc"]);
 const THESAURUS_LABELS = {
   synonyms: "Synonyms",
   antonyms: "Antonyms"
@@ -88,6 +94,16 @@ const el = {
   synonymPaginationLabel: document.getElementById("synonymPaginationLabel"),
   translateBtn: document.getElementById("translateBtn"),
   saveBtn: document.getElementById("saveBtn"),
+  modifyBtn: document.getElementById("modifyBtn"),
+  flashcardOrderMode: document.getElementById("flashcardOrderMode"),
+  flashcardProgress: document.getElementById("flashcardProgress"),
+  flashcardPrevBtn: document.getElementById("flashcardPrevBtn"),
+  flashcardNextBtn: document.getElementById("flashcardNextBtn"),
+  flashcardCard: document.getElementById("flashcardCard"),
+  flashcardFaceLabel: document.getElementById("flashcardFaceLabel"),
+  flashcardLanguageLabel: document.getElementById("flashcardLanguageLabel"),
+  flashcardCardText: document.getElementById("flashcardCardText"),
+  flashcardHint: document.getElementById("flashcardHint"),
   deckSearch: document.getElementById("deckSearch"),
   deckAddManualBtn: document.getElementById("deckAddManualBtn"),
   deckDeleteToolbarBtn: document.getElementById("deckDeleteToolbarBtn"),
@@ -146,6 +162,15 @@ function invalidatePopupContext() {
 
 function getActivePopupTabName() {
   return document.querySelector(".tab-btn.active")?.dataset.tab || "";
+}
+
+function isFormField(element) {
+  return (
+    element instanceof HTMLInputElement ||
+    element instanceof HTMLTextAreaElement ||
+    element instanceof HTMLSelectElement ||
+    Boolean(element?.isContentEditable)
+  );
 }
 
 function hideSettingsToast() {
@@ -472,39 +497,120 @@ function isEditingDeckItem() {
   return Boolean(state.editingDeckItemId);
 }
 
+function isEditingTranslationDraft() {
+  return Boolean(state.editingTranslationDraft);
+}
+
+function isTranslationEditable() {
+  return isEditingDeckItem() || isEditingTranslationDraft();
+}
+
 function setTranslatedTextEditable(editable) {
   el.translatedText.readOnly = !editable;
   el.translatedText.classList.toggle("editable-translation", editable);
 }
 
+function syncTranslatedTextEditableState() {
+  setTranslatedTextEditable(isTranslationEditable());
+}
+
+function getCurrentTranslatedText() {
+  return (isTranslationEditable() ? el.translatedText.value : state.translated).trim();
+}
+
 function updateTranslateSaveButtonState() {
-  if (isEditingDeckItem()) {
-    const hasSource = Boolean(el.sourceText.value.trim());
-    const translatedText = el.translatedText.value.trim();
+  const hasSource = Boolean(el.sourceText.value.trim());
+  const translatedText = getCurrentTranslatedText();
+
+  if (isTranslationEditable()) {
     state.translated = translatedText;
-    el.saveBtn.disabled = !(hasSource && translatedText);
-    return;
   }
 
-  el.saveBtn.disabled = !state.translated.trim();
+  el.saveBtn.disabled = isTranslationEditable() ? !(hasSource && translatedText) : !translatedText;
+  updateModifyButtonState();
 }
 
 function updateSaveButtonLabel() {
-  const editing = isEditingDeckItem();
-  el.saveBtn.textContent = editing ? "Update Card" : "Save to Deck";
-  el.saveBtn.title = editing ? "Update selected card" : "Save to Deck";
+  if (isEditingDeckItem()) {
+    el.saveBtn.textContent = "Update Card";
+    el.saveBtn.title = "Update selected card";
+    return;
+  }
+
+  el.saveBtn.textContent = "Save";
+  el.saveBtn.title = isEditingTranslationDraft() ? "Save the modified card to the deck" : "Save to Deck";
+}
+
+function updateModifyButtonState() {
+  if (!el.modifyBtn) return;
+
+  const draftEditing = isEditingTranslationDraft();
+  const hasTranslation = Boolean((state.translated || el.translatedText.value).trim());
+  const editingDeckItem = isEditingDeckItem();
+
+  el.modifyBtn.disabled = editingDeckItem || (!draftEditing && !hasTranslation);
+  el.modifyBtn.classList.toggle("is-active", draftEditing);
+  el.modifyBtn.setAttribute("aria-pressed", draftEditing ? "true" : "false");
+  el.modifyBtn.title = editingDeckItem
+    ? "Already modifying the selected card"
+    : draftEditing
+      ? "Editing source and translation before saving"
+      : "Modify source and translation before saving";
+}
+
+function exitTranslationDraftEditMode() {
+  if (!isEditingTranslationDraft()) return;
+
+  state.editingTranslationDraft = false;
+  syncTranslatedTextEditableState();
+  updateSaveButtonLabel();
+  updateTranslateSaveButtonState();
+}
+
+function enterTranslationDraftEditMode() {
+  if (isEditingDeckItem()) {
+    return;
+  }
+
+  if (isEditingTranslationDraft()) {
+    exitTranslationDraftEditMode();
+    setStatus("Modify mode turned off.");
+    return;
+  }
+
+  const sourceText = el.sourceText.value.trim();
+  const translatedText = getCurrentTranslatedText();
+
+  if (!sourceText || !translatedText) {
+    setStatus("Translate text before modifying.", true);
+    return;
+  }
+
+  state.editingTranslationDraft = true;
+  el.translatedText.value = translatedText;
+  state.translated = translatedText;
+  syncTranslatedTextEditableState();
+  updateSaveButtonLabel();
+  updateTranslateSaveButtonState();
+  resetSynonymOutput("Synonyms and antonyms update after the next translation.");
+  schedulePopupResize();
+  el.translatedText.focus();
+  const caretPosition = el.translatedText.value.length;
+  el.translatedText.setSelectionRange(caretPosition, caretPosition);
+  setStatus("You can edit both fields before saving.");
 }
 
 function exitDeckEditMode() {
   if (!isEditingDeckItem()) return;
 
   state.editingDeckItemId = "";
-  setTranslatedTextEditable(false);
+  syncTranslatedTextEditableState();
   updateSaveButtonLabel();
   updateTranslateSaveButtonState();
 }
 
 function resetTranslationOutput(placeholder = DEFAULT_TRANSLATED_PLACEHOLDER) {
+  exitTranslationDraftEditMode();
   state.translated = "";
   el.translatedText.value = "";
   el.translatedText.placeholder = placeholder;
@@ -1056,6 +1162,19 @@ function switchTab(tabName) {
   schedulePopupResize();
 }
 
+function focusSourceText(moveCaretToEnd = false) {
+  window.setTimeout(() => {
+    if (!(el.sourceText instanceof HTMLTextAreaElement)) return;
+
+    el.sourceText.focus();
+
+    if (moveCaretToEnd) {
+      const caretPosition = el.sourceText.value.length;
+      el.sourceText.setSelectionRange(caretPosition, caretPosition);
+    }
+  }, 0);
+}
+
 function updateSwapLanguageButtonState() {
   if (!el.swapLangBtn) return;
 
@@ -1077,11 +1196,11 @@ function clearSourceText() {
   el.sourceText.value = "";
   resetTranslateOutputs();
   updateClearSourceTextButtonState();
-  el.sourceText.focus();
+  focusSourceText();
 }
 
 function handleTranslatedTextChanged() {
-  if (!isEditingDeckItem()) return;
+  if (!isTranslationEditable()) return;
 
   state.translated = el.translatedText.value.trim();
   updateTranslateSaveButtonState();
@@ -1089,6 +1208,7 @@ function handleTranslatedTextChanged() {
 }
 
 function enterDeckEditMode(item) {
+  state.editingTranslationDraft = false;
   state.editingDeckItemId = item.id;
   state.sourceLang = item.sourceLang || "auto";
   state.targetLang = item.targetLang || "vi";
@@ -1100,7 +1220,7 @@ function enterDeckEditMode(item) {
   el.translatedText.placeholder = DEFAULT_TRANSLATED_PLACEHOLDER;
   state.translated = item.translatedText.trim();
 
-  setTranslatedTextEditable(true);
+  syncTranslatedTextEditableState();
   updateSaveButtonLabel();
   updateSwapLanguageButtonState();
   updateClearSourceTextButtonState();
@@ -1109,11 +1229,7 @@ function enterDeckEditMode(item) {
   setThesaurusButtonState({ disabled: !state.translated.trim() });
   switchTab("translate");
   schedulePopupResize();
-
-  window.setTimeout(() => {
-    el.sourceText.focus();
-    el.sourceText.setSelectionRange(el.sourceText.value.length, el.sourceText.value.length);
-  }, 0);
+  focusSourceText(true);
 }
 
 function swapSelectedLanguages() {
@@ -1234,7 +1350,7 @@ async function fillTranslateFromActiveTabSelection() {
 function handleTranslateInputsChanged() {
   state.sourceLang = el.sourceLang.value;
   state.targetLang = el.targetLang.value;
-  if (isEditingDeckItem()) {
+  if (isTranslationEditable()) {
     resetSynonymOutput("Synonyms and antonyms update after the next translation.");
     updateClearSourceTextButtonState();
     updateTranslateSaveButtonState();
@@ -1359,6 +1475,174 @@ function getFilteredDeckItems(items = state.deck) {
   return { filteredItems, query };
 }
 
+function normalizeFlashcardOrderMode(value) {
+  return FLASHCARD_ORDER_MODES.has(value) ? value : "time-desc";
+}
+
+function shuffleDeckItems(items) {
+  const shuffledItems = [...items];
+
+  for (let index = shuffledItems.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [shuffledItems[index], shuffledItems[swapIndex]] = [shuffledItems[swapIndex], shuffledItems[index]];
+  }
+
+  return shuffledItems;
+}
+
+function sortFlashcardItems(items, orderMode = state.flashcardOrderMode) {
+  if (orderMode === "random") {
+    return shuffleDeckItems(items);
+  }
+
+  const sortedItems = [...items];
+  sortedItems.sort((left, right) => {
+    if (orderMode === "alpha-asc") {
+      const sourceDiff = String(left?.sourceText || "").localeCompare(String(right?.sourceText || ""));
+      if (sourceDiff !== 0) return sourceDiff;
+      return getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
+    }
+
+    if (orderMode === "alpha-desc") {
+      const sourceDiff = String(right?.sourceText || "").localeCompare(String(left?.sourceText || ""));
+      if (sourceDiff !== 0) return sourceDiff;
+      return getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
+    }
+
+    if (orderMode === "time-asc") {
+      const timestampDiff = getDeckItemTimestamp(left) - getDeckItemTimestamp(right);
+      if (timestampDiff !== 0) return timestampDiff;
+      return String(left?.id || "").localeCompare(String(right?.id || ""));
+    }
+
+    const timestampDiff = getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
+    if (timestampDiff !== 0) return timestampDiff;
+    return String(right?.id || "").localeCompare(String(left?.id || ""));
+  });
+
+  return sortedItems;
+}
+
+function buildFlashcardSequence(items = state.deck) {
+  const sequenceItems = sortFlashcardItems(items, state.flashcardOrderMode);
+  return sequenceItems.map((item) => item.id);
+}
+
+function getCurrentFlashcardItem() {
+  const currentId = state.flashcardSequenceIds[state.flashcardIndex];
+  if (!currentId) return null;
+
+  return state.deck.find((item) => item.id === currentId) || null;
+}
+
+function ensureFlashcardSequence() {
+  if (!state.deck.length) {
+    state.flashcardSequenceIds = [];
+    state.flashcardIndex = 0;
+    state.flashcardShowingMeaning = false;
+    return;
+  }
+
+  if (!state.flashcardSequenceIds.length) {
+    state.flashcardSequenceIds = buildFlashcardSequence(state.deck);
+    state.flashcardIndex = 0;
+  }
+
+  if (state.flashcardIndex >= state.flashcardSequenceIds.length) {
+    state.flashcardIndex = 0;
+  }
+
+  if (!getCurrentFlashcardItem()) {
+    state.flashcardSequenceIds = buildFlashcardSequence(state.deck);
+    state.flashcardIndex = 0;
+  }
+}
+
+function renderFlashcard() {
+  ensureFlashcardSequence();
+
+  const currentItem = getCurrentFlashcardItem();
+  const totalCards = state.flashcardSequenceIds.length;
+  const showingMeaning = state.flashcardShowingMeaning;
+
+  el.flashcardOrderMode.value = state.flashcardOrderMode;
+
+  if (!currentItem || !totalCards) {
+    el.flashcardProgress.textContent = "0 of 0";
+    el.flashcardPrevBtn.disabled = true;
+    el.flashcardNextBtn.disabled = true;
+    el.flashcardCard.disabled = true;
+    el.flashcardCard.dataset.face = "empty";
+    el.flashcardCard.setAttribute("aria-label", "No flashcards available");
+    el.flashcardFaceLabel.textContent = "Flashcards";
+    el.flashcardLanguageLabel.textContent = "Deck";
+    el.flashcardCardText.textContent = "Add cards to your deck to start reviewing.";
+    el.flashcardHint.textContent = "Click a card to flip between the original text and its meaning.";
+    el.flashcardHint.hidden = false;
+    schedulePopupResize();
+    return;
+  }
+
+  el.flashcardProgress.textContent = `${state.flashcardIndex + 1} of ${totalCards}`;
+  el.flashcardPrevBtn.disabled = false;
+  el.flashcardNextBtn.disabled = false;
+  el.flashcardCard.disabled = false;
+  el.flashcardCard.dataset.face = showingMeaning ? "back" : "front";
+  el.flashcardFaceLabel.textContent = showingMeaning ? "Meaning" : "Original";
+  el.flashcardLanguageLabel.textContent = formatDeckLanguageIndicator(currentItem.sourceLang, currentItem.targetLang);
+  el.flashcardCardText.textContent = showingMeaning ? currentItem.translatedText : currentItem.sourceText;
+  el.flashcardHint.textContent = "";
+  el.flashcardHint.hidden = true;
+  el.flashcardCard.setAttribute(
+    "aria-label",
+    showingMeaning
+      ? `Flashcard meaning: ${currentItem.translatedText}`
+      : `Flashcard original text: ${currentItem.sourceText}`
+  );
+  schedulePopupResize();
+}
+
+function resetFlashcardSession() {
+  state.flashcardSequenceIds = buildFlashcardSequence(state.deck);
+  state.flashcardIndex = 0;
+  state.flashcardShowingMeaning = false;
+  renderFlashcard();
+}
+
+function toggleFlashcardFace() {
+  if (!getCurrentFlashcardItem()) return;
+
+  state.flashcardShowingMeaning = !state.flashcardShowingMeaning;
+  renderFlashcard();
+}
+
+function goToFlashcardStep(step) {
+  if (!state.deck.length) {
+    renderFlashcard();
+    return;
+  }
+
+  ensureFlashcardSequence();
+
+  if (!state.flashcardSequenceIds.length) {
+    renderFlashcard();
+    return;
+  }
+
+  const totalCards = state.flashcardSequenceIds.length;
+  state.flashcardIndex = (state.flashcardIndex + step + totalCards) % totalCards;
+  state.flashcardShowingMeaning = false;
+  renderFlashcard();
+}
+
+function goToPreviousFlashcard() {
+  goToFlashcardStep(-1);
+}
+
+function goToNextFlashcard() {
+  goToFlashcardStep(1);
+}
+
 function updateDeckPagination(totalItems) {
   const pageSize = state.deckPageSize;
   const totalPages = totalItems > 0 ? Math.ceil(totalItems / pageSize) : 1;
@@ -1466,12 +1750,46 @@ async function refreshDeck() {
   state.deck = sortDeckItemsByNewest(await readDeckItems());
   pruneDeckSelection();
   renderDeck();
+  resetFlashcardSession();
 }
 
 async function refreshDatabaseLocationLabel() {
   const info = await getDatabaseLocationInfo();
   el.dbSummaryLabel.textContent = info.summary;
   el.dbLocationLabel.textContent = info.detail;
+}
+
+async function loadFlashcardSettings() {
+  const data = await withPopupContext(() => chrome.storage.local.get(["flashcardOrderMode"]), null);
+  if (!data) {
+    renderFlashcard();
+    return;
+  }
+
+  state.flashcardOrderMode = normalizeFlashcardOrderMode(data.flashcardOrderMode);
+  resetFlashcardSession();
+}
+
+async function saveFlashcardOrderMode() {
+  await withPopupContext(() => chrome.storage.local.set({ flashcardOrderMode: state.flashcardOrderMode }), null);
+}
+
+async function changeFlashcardOrderMode() {
+  state.flashcardOrderMode = normalizeFlashcardOrderMode(el.flashcardOrderMode.value);
+  resetFlashcardSession();
+  await saveFlashcardOrderMode();
+  if (!popupContextAvailable) return;
+  const modeLabel =
+    state.flashcardOrderMode === "random"
+      ? "random"
+      : state.flashcardOrderMode === "alpha-asc"
+        ? "alphabetical A-Z"
+        : state.flashcardOrderMode === "alpha-desc"
+          ? "alphabetical Z-A"
+          : state.flashcardOrderMode === "time-asc"
+            ? "oldest-first"
+            : "newest-first";
+  setStatus(`Flashcards set to ${modeLabel} review.`);
 }
 
 async function loadGoogleApiKey() {
@@ -1723,17 +2041,30 @@ async function translateCurrentText() {
     schedulePopupResize();
     setStatus("Translation completed.");
   } catch (error) {
-    resetTranslateOutputs();
+    if (isTranslationEditable()) {
+      resetSynonymOutput("Synonyms and antonyms update after the next translation.");
+      setThesaurusButtonState({ disabled: !getCurrentTranslatedText() });
+      updateTranslateSaveButtonState();
+    } else {
+      resetTranslateOutputs();
+    }
     setStatus(error?.message || "Translation failed.", true);
   }
 }
 
 async function saveCurrentTranslation() {
   const sourceText = el.sourceText.value.trim();
-  const translatedText = (isEditingDeckItem() ? el.translatedText.value : state.translated).trim();
+  const translatedText = getCurrentTranslatedText();
 
   if (!sourceText || !translatedText) {
-    setStatus(isEditingDeckItem() ? "Enter both source and translated text before updating." : "Translate text before saving.", true);
+    setStatus(
+      isEditingDeckItem()
+        ? "Enter both source and translated text before updating."
+        : isEditingTranslationDraft()
+          ? "Enter both source and translated text before saving."
+          : "Translate text before saving.",
+      true
+    );
     return;
   }
 
@@ -1769,6 +2100,7 @@ async function saveCurrentTranslation() {
     resetTranslateOutputs();
     updateClearSourceTextButtonState();
     renderDeck();
+    resetFlashcardSession();
     switchTab("deck");
     showSaveToast("Deck item updated.");
     setStatus("Deck item updated.");
@@ -1788,6 +2120,7 @@ async function saveCurrentTranslation() {
   await withPopupContext(() => chrome.storage.local.set({ deckItems: state.deck }), null);
   if (!popupContextAvailable) return;
   renderDeck();
+  resetFlashcardSession();
   showSaveToast("Added to Deck successfully.");
   setStatus("Saved to deck.");
 }
@@ -1838,6 +2171,7 @@ async function persistDeckState() {
   await withPopupContext(() => chrome.storage.local.set({ deckItems: state.deck }), null);
   if (!popupContextAvailable) return;
   renderDeck();
+  resetFlashcardSession();
 }
 
 async function importDeckItems() {
@@ -1993,9 +2327,7 @@ function focusTranslateInputForManualAdd() {
   }
 
   switchTab("translate");
-  window.setTimeout(() => {
-    el.sourceText.focus();
-  }, 0);
+  focusSourceText();
   setStatus("Translate tab ready for manual card entry.");
 }
 
@@ -2011,6 +2343,31 @@ function goToDeckPage(nextPage) {
   renderDeck();
 }
 
+function handleFlashcardKeyDown(event) {
+  if (getActivePopupTabName() !== "flashcards") return;
+  if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
+
+  const target = event.target;
+  if (isFormField(target)) return;
+
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    goToPreviousFlashcard();
+    return;
+  }
+
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    goToNextFlashcard();
+    return;
+  }
+
+  if (event.code === "Space" || event.key === " ") {
+    event.preventDefault();
+    toggleFlashcardFace();
+  }
+}
+
 function bindEvents() {
   el.tabButtons.forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
@@ -2018,6 +2375,11 @@ function bindEvents() {
 
   bindAsyncEvent(el.translateBtn, "click", translateCurrentText, "Translation failed.");
   bindAsyncEvent(el.saveBtn, "click", saveCurrentTranslation, "Could not save translation.");
+  el.modifyBtn.addEventListener("click", enterTranslationDraftEditMode);
+  bindAsyncEvent(el.flashcardOrderMode, "change", changeFlashcardOrderMode, "Could not update flashcard order.");
+  el.flashcardCard.addEventListener("click", toggleFlashcardFace);
+  el.flashcardPrevBtn.addEventListener("click", goToPreviousFlashcard);
+  el.flashcardNextBtn.addEventListener("click", goToNextFlashcard);
   bindAsyncEvent(el.loadSynonymsBtn, "click", () => loadSynonymsForCurrentTranslation("synonyms"), "Could not load synonyms.");
   bindAsyncEvent(el.loadAntonymsBtn, "click", () => loadSynonymsForCurrentTranslation("antonyms"), "Could not load antonyms.");
   el.synonymPrevPageBtn.addEventListener("click", () => goToSynonymPage(state.thesaurusPage - 1));
@@ -2049,6 +2411,7 @@ function bindEvents() {
     state.deckSort = el.deckSort.value;
     state.deckPage = 1;
     renderDeck();
+    renderFlashcard();
   });
   el.deckPrevPageBtn.addEventListener("click", () => goToDeckPage(state.deckPage - 1));
   el.deckNextPageBtn.addEventListener("click", () => goToDeckPage(state.deckPage + 1));
@@ -2133,12 +2496,13 @@ function bindEvents() {
   });
 
   bindAsyncEvent(el.applyHighlightToTabBtn, "click", applyHighlightToCurrentTab, "Could not apply highlight.");
+  document.addEventListener("keydown", handleFlashcardKeyDown);
 }
 
 async function init() {
   await initializeDatabase();
   renderLanguages();
-  setTranslatedTextEditable(false);
+  syncTranslatedTextEditableState();
   updateSaveButtonLabel();
   resetTranslateOutputs();
   updateClearSourceTextButtonState();
@@ -2149,6 +2513,7 @@ async function init() {
   await Promise.all([
     refreshDeck(),
     refreshDatabaseLocationLabel(),
+    loadFlashcardSettings(),
     loadHighlightSetting(),
     loadGoogleApiKey(),
     loadMerriamWebsterSettings()
@@ -2158,6 +2523,7 @@ async function init() {
     setStatus("Ready.");
   }
   schedulePopupResize();
+  focusSourceText(true);
 }
 
 init().catch((error) => {

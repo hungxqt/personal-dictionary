@@ -11,6 +11,7 @@
       <nav class="tabs">
         <button class="tab-btn active" data-tab="translate">Translate</button>
         <button class="tab-btn" data-tab="deck">Deck</button>
+        <button class="tab-btn" data-tab="flashcards">Flashcards</button>
         <button class="tab-btn" data-tab="settings">Settings</button>
       </nav>
 
@@ -45,7 +46,8 @@
         </div>
         <div class="row actions">
           <button id="translateBtn">Translate</button>
-          <button id="saveBtn" disabled>Save to Deck</button>
+          <button id="saveBtn" disabled>Save</button>
+          <button id="modifyBtn" type="button" disabled>Modify</button>
         </div>
         <div class="row">
           <textarea id="translatedText" placeholder="Translation appears here..." readonly></textarea>
@@ -163,6 +165,42 @@
           </div>
         </div>
         <div id="deckList" class="deck-list"></div>
+      </section>
+
+      <section class="tab-panel" id="tab-flashcards">
+        <div class="flashcard-toolbar">
+          <div class="flashcard-order-field">
+            <label for="flashcardOrderMode">Card order</label>
+            <select id="flashcardOrderMode">
+              <option value="random">Random</option>
+              <option value="alpha-asc">Alphabet A-Z</option>
+              <option value="alpha-desc">Alphabet Z-A</option>
+              <option value="time-desc">Time newest first</option>
+              <option value="time-asc">Time oldest first</option>
+            </select>
+          </div>
+          <div id="flashcardProgress" class="flashcard-progress" aria-live="polite">0 of 0</div>
+          <div class="flashcard-nav" aria-label="Flashcard navigation">
+            <button id="flashcardPrevBtn" class="flashcard-nav-btn" type="button" aria-label="Previous card" title="Previous card" disabled>
+              <svg class="flashcard-nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M15 6 9 12l6 6" />
+              </svg>
+            </button>
+            <button id="flashcardNextBtn" class="flashcard-nav-btn" type="button" aria-label="Next card" title="Next card" disabled>
+              <svg class="flashcard-nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m9 6 6 6-6 6" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <button id="flashcardCard" class="flashcard-card" type="button" data-face="empty" disabled>
+          <div class="flashcard-card-head">
+            <span id="flashcardFaceLabel" class="flashcard-face-label">Flashcards</span>
+            <span id="flashcardLanguageLabel" class="flashcard-language-label">Deck</span>
+          </div>
+          <div id="flashcardCardText" class="flashcard-card-text">Add cards to your deck to start reviewing.</div>
+          <div id="flashcardHint" class="flashcard-hint"></div>
+        </button>
       </section>
 
       <section class="tab-panel" id="tab-settings">
