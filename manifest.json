@@ -9,7 +9,8 @@
     "scripting"
   ],
   "host_permissions": [
-    "https://translation.googleapis.com/*"
+    "https://translation.googleapis.com/*",
+    "https://api.cognitive.microsofttranslator.com/*"
   ],
   "action": {
     "default_title": "Vocab Translator",

@@ -38,6 +38,17 @@
         <div class="row">
           <textarea id="translatedText" placeholder="Translation appears here..." readonly></textarea>
         </div>
+        <div class="row synonym-section">
+          <div class="synonym-toolbar">
+            <button id="loadSynonymsBtn" class="aux-action-btn" type="button" disabled>Synonyms</button>
+          </div>
+          <div id="synonymResults" class="synonym-results" aria-live="polite" hidden></div>
+          <div id="synonymPagination" class="synonym-pagination" aria-label="Synonym pagination" hidden>
+            <button id="synonymPrevPageBtn" class="synonym-page-btn" type="button" aria-label="Previous synonym page">‹</button>
+            <span id="synonymPaginationLabel" class="synonym-pagination-label">0 - 0 of 0</span>
+            <button id="synonymNextPageBtn" class="synonym-page-btn" type="button" aria-label="Next synonym page">›</button>
+          </div>
+        </div>
       </section>
 
       <section class="tab-panel" id="tab-deck">
@@ -126,7 +137,7 @@
           <input
             id="deckImportInput"
             type="file"
-            accept=".json,.csv,.txt,.text,application/json,text/csv,text/plain"
+            accept=".db,.json,.csv,.txt,.text,application/octet-stream,application/json,text/csv,text/plain"
             hidden
           />
           <div class="deck-search-pagination-row">
@@ -156,8 +167,26 @@
         </div>
 
         <div class="setting-card">
+          <h3>Synonym Provider (Microsoft Translator)</h3>
+          <p class="muted">Uses Azure AI Translator Dictionary Lookup for source-word synonym suggestions.</p>
+          <div class="row">
+            <label for="microsoftTranslatorApiKey">Microsoft Translator API Key</label>
+            <input id="microsoftTranslatorApiKey" type="password" placeholder="Azure Translator key" />
+          </div>
+          <div class="row">
+            <label for="microsoftTranslatorRegion">Azure Region</label>
+            <input id="microsoftTranslatorRegion" type="text" placeholder="e.g. southeastasia" />
+          </div>
+          <p class="muted small">Leave region blank only if your Translator resource does not require it.</p>
+          <div class="actions wrap">
+            <button id="saveMicrosoftTranslatorBtn">Save Microsoft Settings</button>
+            <button id="clearMicrosoftTranslatorBtn">Clear Microsoft Settings</button>
+          </div>
+        </div>
+
+        <div class="setting-card">
           <h3>Database</h3>
-          <p class="muted">Deck is saved in <code>database.db</code>.</p>
+          <p class="muted" id="dbSummaryLabel">Loading database location...</p>
           <p><strong>Current location:</strong> <span id="dbLocationLabel">Loading...</span></p>
           <div class="actions wrap">
             <button id="useDefaultDbBtn">Use Default Location</button>
@@ -188,6 +217,8 @@
           <button id="applyHighlightToTabBtn">Apply to Current Tab</button>
         </div>
       </section>
+
+      <div id="saveToast" class="save-toast" role="status" aria-live="polite" hidden></div>
     </div>
 
     <script type="module" src="popup.js"></script>

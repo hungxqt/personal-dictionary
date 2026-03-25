@@ -1,10 +1,10 @@
 import { LANGUAGES } from "../lib/languages.js";
-import { translateText } from "../lib/translator.js";
+import { lookupSourceSynonyms, translateTextDetailed, translateTextList } from "../lib/translator.js";
 import {
   initializeDatabase,
   chooseCustomDatabaseFile,
   useDefaultDatabaseLocation,
-  getDatabaseLocationLabel,
+  getDatabaseLocationInfo,
   readDeckItems,
   writeDeckItems,
   createDeckItem
@@ -14,6 +14,13 @@ const state = {
   translated: "",
   sourceLang: "en",
   targetLang: "vi",
+  synonyms: [],
+  synonymsLoaded: false,
+  synonymsVisible: false,
+  synonymStatusMessage: "",
+  synonymTargetLang: "vi",
+  synonymPage: 1,
+  synonymPageSize: 5,
   deck: [],
   selectedDeckIds: new Set(),
   deckClipboard: [],
@@ -21,6 +28,8 @@ const state = {
   deckPage: 1,
   deckPageSize: 10,
   googleApiKey: "",
+  microsoftTranslatorApiKey: "",
+  microsoftTranslatorRegion: "",
   highlightBlockedUrls: []
 };
 
@@ -42,7 +51,12 @@ const DECK_TRANSFER_FORMATS = {
   }
 };
 
+const DEFAULT_TRANSLATED_PLACEHOLDER = "Translation appears here...";
+const DEFAULT_SYNONYM_MESSAGE = "Translate text first, then click Synonyms.";
+const READY_SYNONYM_MESSAGE = "Click Synonyms to load suggestions.";
+
 const el = {
+  app: document.querySelector(".app"),
   tabButtons: document.querySelectorAll(".tab-btn"),
   tabPanels: document.querySelectorAll(".tab-panel"),
   sourceLang: document.getElementById("sourceLang"),
@@ -50,6 +64,12 @@ const el = {
   swapLangBtn: document.getElementById("swapLangBtn"),
   sourceText: document.getElementById("sourceText"),
   translatedText: document.getElementById("translatedText"),
+  loadSynonymsBtn: document.getElementById("loadSynonymsBtn"),
+  synonymResults: document.getElementById("synonymResults"),
+  synonymPagination: document.getElementById("synonymPagination"),
+  synonymPrevPageBtn: document.getElementById("synonymPrevPageBtn"),
+  synonymNextPageBtn: document.getElementById("synonymNextPageBtn"),
+  synonymPaginationLabel: document.getElementById("synonymPaginationLabel"),
   translateBtn: document.getElementById("translateBtn"),
   saveBtn: document.getElementById("saveBtn"),
   deckSearch: document.getElementById("deckSearch"),
@@ -69,6 +89,11 @@ const el = {
   googleApiKey: document.getElementById("googleApiKey"),
   saveApiKeyBtn: document.getElementById("saveApiKeyBtn"),
   clearApiKeyBtn: document.getElementById("clearApiKeyBtn"),
+  microsoftTranslatorApiKey: document.getElementById("microsoftTranslatorApiKey"),
+  microsoftTranslatorRegion: document.getElementById("microsoftTranslatorRegion"),
+  saveMicrosoftTranslatorBtn: document.getElementById("saveMicrosoftTranslatorBtn"),
+  clearMicrosoftTranslatorBtn: document.getElementById("clearMicrosoftTranslatorBtn"),
+  dbSummaryLabel: document.getElementById("dbSummaryLabel"),
   dbLocationLabel: document.getElementById("dbLocationLabel"),
   useDefaultDbBtn: document.getElementById("useDefaultDbBtn"),
   chooseDbBtn: document.getElementById("chooseDbBtn"),
@@ -77,10 +102,13 @@ const el = {
   addHighlightBlockUrlBtn: document.getElementById("addHighlightBlockUrlBtn"),
   highlightBlockUrlList: document.getElementById("highlightBlockUrlList"),
   applyHighlightToTabBtn: document.getElementById("applyHighlightToTabBtn"),
+  saveToast: document.getElementById("saveToast"),
   status: document.getElementById("status")
 };
 
 let popupContextAvailable = true;
+let popupResizeFrame = 0;
+let saveToastTimeoutId = 0;
 
 function isExtensionContextInvalidatedError(error) {
   const message = error?.message || String(error || "");
@@ -136,12 +164,206 @@ function handlePopupAsyncError(error, fallbackMessage = "Operation failed.") {
   setStatus(error?.message || fallbackMessage, true);
 }
 
+function showSaveToast(message) {
+  if (!el.saveToast) return;
+
+  window.clearTimeout(saveToastTimeoutId);
+  el.saveToast.textContent = message;
+  el.saveToast.hidden = false;
+
+  window.requestAnimationFrame(() => {
+    el.saveToast.classList.add("visible");
+  });
+
+  saveToastTimeoutId = window.setTimeout(() => {
+    el.saveToast.classList.remove("visible");
+    window.setTimeout(() => {
+      if (!el.saveToast.classList.contains("visible")) {
+        el.saveToast.hidden = true;
+      }
+    }, 180);
+  }, 1800);
+}
+
 function bindAsyncEvent(target, eventName, handler, fallbackMessage = "Operation failed.") {
   target.addEventListener(eventName, (event) => {
     Promise.resolve(handler(event)).catch((error) => {
       handlePopupAsyncError(error, fallbackMessage);
     });
   });
+}
+
+function schedulePopupResize() {
+  if (popupResizeFrame) return;
+
+  popupResizeFrame = window.requestAnimationFrame(() => {
+    popupResizeFrame = 0;
+
+    if (!el.app) return;
+
+    document.documentElement.style.height = "auto";
+    document.documentElement.style.maxHeight = "none";
+    document.body.style.height = "auto";
+    document.body.style.maxHeight = "none";
+
+    const popupHeight = Math.min(el.app.scrollHeight + 12, 600);
+
+    document.documentElement.style.height = `${popupHeight}px`;
+    document.documentElement.style.maxHeight = `${popupHeight}px`;
+    document.body.style.height = `${popupHeight}px`;
+    document.body.style.maxHeight = `${popupHeight}px`;
+  });
+}
+
+function setSynonymButtonState({ disabled = true, loading = false } = {}) {
+  el.loadSynonymsBtn.disabled = disabled;
+  if (loading) {
+    el.loadSynonymsBtn.textContent = "Loading...";
+    return;
+  }
+
+  if (state.synonymsVisible) {
+    el.loadSynonymsBtn.textContent = "Hide Synonyms";
+    return;
+  }
+
+  el.loadSynonymsBtn.textContent = state.synonymsLoaded ? "Show Synonyms" : "Synonyms";
+}
+
+function updateSynonymPagination(totalItems) {
+  const pageSize = state.synonymPageSize;
+  const totalPages = totalItems > 0 ? Math.ceil(totalItems / pageSize) : 1;
+  state.synonymPage = Math.min(Math.max(state.synonymPage, 1), totalPages);
+
+  if (!totalItems) {
+    el.synonymPagination.hidden = true;
+    el.synonymPaginationLabel.textContent = "0 - 0 of 0";
+    el.synonymPrevPageBtn.disabled = true;
+    el.synonymNextPageBtn.disabled = true;
+    return { startIndex: 0, endIndex: 0 };
+  }
+
+  const startIndex = (state.synonymPage - 1) * pageSize;
+  const endIndex = Math.min(startIndex + pageSize, totalItems);
+
+  el.synonymPagination.hidden = totalItems <= pageSize;
+  el.synonymPaginationLabel.textContent = `${startIndex + 1} - ${endIndex} of ${totalItems}`;
+  el.synonymPrevPageBtn.disabled = state.synonymPage <= 1;
+  el.synonymNextPageBtn.disabled = state.synonymPage >= totalPages;
+
+  return { startIndex, endIndex };
+}
+
+function showSynonymPanel() {
+  state.synonymsVisible = true;
+  el.synonymResults.hidden = false;
+  el.app?.classList.add("synonym-open");
+}
+
+function hideSynonymPanel() {
+  state.synonymsVisible = false;
+  el.synonymResults.hidden = true;
+  el.synonymPagination.hidden = true;
+  el.app?.classList.remove("synonym-open");
+  setSynonymButtonState({ disabled: !state.translated.trim() });
+  schedulePopupResize();
+}
+
+function renderSynonymMessage(message = DEFAULT_SYNONYM_MESSAGE) {
+  state.synonymStatusMessage = message;
+  const emptyState = document.createElement("div");
+  emptyState.className = "synonym-empty";
+  emptyState.textContent = message;
+  el.synonymResults.replaceChildren(emptyState);
+  updateSynonymPagination(0);
+  schedulePopupResize();
+}
+
+function findLanguageName(code) {
+  return LANGUAGES.find((lang) => lang.code === code)?.name || String(code || "").toUpperCase();
+}
+
+function renderSynonymResults(items, targetLang) {
+  if (!items.length) {
+    renderSynonymMessage("No synonym suggestions found for this text.");
+    return;
+  }
+
+  const { startIndex, endIndex } = updateSynonymPagination(items.length);
+  const pageItems = items.slice(startIndex, endIndex);
+
+  const header = document.createElement("div");
+  header.className = "synonym-results-head";
+
+  const sourceLabel = document.createElement("div");
+  sourceLabel.textContent = "Synonym";
+
+  const targetLabel = document.createElement("div");
+  targetLabel.textContent = `Meaning (${findLanguageName(targetLang)})`;
+
+  header.append(sourceLabel, targetLabel);
+
+  const body = document.createElement("div");
+  body.className = "synonym-results-body";
+
+  pageItems.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "synonym-results-row";
+
+    const synonymCell = document.createElement("div");
+    synonymCell.className = "synonym-source";
+    synonymCell.textContent = item.sourceText;
+
+    const meaningCell = document.createElement("div");
+    meaningCell.className = "synonym-meaning";
+    meaningCell.textContent = item.translatedText;
+
+    row.append(synonymCell, meaningCell);
+    body.appendChild(row);
+  });
+
+  el.synonymResults.replaceChildren(header, body);
+  schedulePopupResize();
+}
+
+function resetSynonymOutput(message = DEFAULT_SYNONYM_MESSAGE) {
+  state.synonyms = [];
+  state.synonymsLoaded = false;
+  state.synonymsVisible = false;
+  state.synonymStatusMessage = message;
+  state.synonymPage = 1;
+  hideSynonymPanel();
+}
+
+function goToSynonymPage(nextPage) {
+  state.synonymPage = Math.max(1, nextPage);
+  renderSynonymResults(state.synonyms, state.synonymTargetLang);
+}
+
+function showCachedSynonymPanel() {
+  showSynonymPanel();
+  if (state.synonyms.length) {
+    renderSynonymResults(state.synonyms, state.synonymTargetLang);
+  } else {
+    renderSynonymMessage(state.synonymStatusMessage || DEFAULT_SYNONYM_MESSAGE);
+  }
+  setSynonymButtonState({ disabled: !state.translated.trim() });
+}
+
+function resetTranslationOutput(placeholder = DEFAULT_TRANSLATED_PLACEHOLDER) {
+  state.translated = "";
+  el.translatedText.value = "";
+  el.translatedText.placeholder = placeholder;
+  el.saveBtn.disabled = true;
+}
+
+function resetTranslateOutputs({
+  translatedPlaceholder = DEFAULT_TRANSLATED_PLACEHOLDER,
+  synonymMessage = DEFAULT_SYNONYM_MESSAGE
+} = {}) {
+  resetTranslationOutput(translatedPlaceholder);
+  resetSynonymOutput(synonymMessage);
+  setSynonymButtonState({ disabled: true });
 }
 
 function normalizeDeckTextValue(value) {
@@ -236,6 +458,7 @@ function buildDeckItemSignature(item) {
 
 function detectDeckTransferFormat(filename = "") {
   const normalizedName = String(filename).trim().toLowerCase();
+  if (normalizedName.endsWith(".db")) return "json";
   if (normalizedName.endsWith(".json")) return "json";
   if (normalizedName.endsWith(".csv")) return "csv";
   if (normalizedName.endsWith(".txt") || normalizedName.endsWith(".text")) return "txt";
@@ -587,6 +810,7 @@ async function chooseDeckImportFile() {
         {
           description: "Deck Import Files",
           accept: {
+            "application/octet-stream": [".db"],
             "application/json": [".json"],
             "text/csv": [".csv"],
             "text/plain": [".txt", ".text"]
@@ -670,6 +894,8 @@ function switchTab(tabName) {
   el.tabPanels.forEach((panel) => {
     panel.classList.toggle("active", panel.id === `tab-${tabName}`);
   });
+
+  schedulePopupResize();
 }
 
 function updateSwapLanguageButtonState() {
@@ -693,6 +919,8 @@ function swapSelectedLanguages() {
   el.sourceLang.value = currentTargetLang;
   el.targetLang.value = currentSourceLang;
   updateSwapLanguageButtonState();
+  state.sourceLang = el.sourceLang.value;
+  state.targetLang = el.targetLang.value;
 
   const currentSourceText = el.sourceText.value;
   const currentTranslatedText = el.translatedText.value;
@@ -701,13 +929,11 @@ function swapSelectedLanguages() {
     el.sourceText.value = currentTranslatedText;
     el.translatedText.value = currentSourceText;
     state.translated = currentSourceText.trim();
-    state.sourceLang = el.sourceLang.value;
-    state.targetLang = el.targetLang.value;
+    resetSynonymOutput("Synonyms update after the next translation.");
+    setSynonymButtonState({ disabled: true });
     el.saveBtn.disabled = !state.translated;
   } else {
-    state.translated = "";
-    el.translatedText.value = "";
-    el.saveBtn.disabled = true;
+    resetTranslateOutputs();
   }
 
   setStatus("Languages switched.");
@@ -788,11 +1014,26 @@ async function fillTranslateFromActiveTabSelection() {
   if (!selectedText) return false;
 
   el.sourceText.value = selectedText;
-  state.translated = "";
-  el.translatedText.value = "";
-  el.saveBtn.disabled = true;
+  resetTranslateOutputs();
   setStatus("Selected text loaded into Translate.");
   return true;
+}
+
+function handleTranslateInputsChanged() {
+  state.sourceLang = el.sourceLang.value;
+  state.targetLang = el.targetLang.value;
+  resetTranslateOutputs();
+}
+
+function handleSourceTextKeyDown(event) {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
+    return;
+  }
+
+  event.preventDefault();
+  Promise.resolve(translateCurrentText()).catch((error) => {
+    handlePopupAsyncError(error, "Translation failed.");
+  });
 }
 
 function renderLanguages() {
@@ -924,6 +1165,7 @@ function renderDeck(items = state.deck) {
   if (!filteredItems.length) {
     el.deckList.innerHTML = `<div class="deck-item">${query ? "No matching cards." : "No saved words yet."}</div>`;
     updateDeckToolbarState();
+    schedulePopupResize();
     return;
   }
 
@@ -960,11 +1202,13 @@ function renderDeck(items = state.deck) {
 
   el.deckList.innerHTML = html;
   updateDeckToolbarState();
+  schedulePopupResize();
 }
 
 function renderHighlightBlockedUrlList() {
   if (!state.highlightBlockedUrls.length) {
     el.highlightBlockUrlList.innerHTML = '<div class="highlight-block-empty">No blocked URLs yet.</div>';
+    schedulePopupResize();
     return;
   }
 
@@ -985,6 +1229,8 @@ function renderHighlightBlockedUrlList() {
       `
     )
     .join("");
+
+  schedulePopupResize();
 }
 
 function escapeHtml(value) {
@@ -1003,7 +1249,9 @@ async function refreshDeck() {
 }
 
 async function refreshDatabaseLocationLabel() {
-  el.dbLocationLabel.textContent = await getDatabaseLocationLabel();
+  const info = await getDatabaseLocationInfo();
+  el.dbSummaryLabel.textContent = info.summary;
+  el.dbLocationLabel.textContent = info.detail;
 }
 
 async function loadGoogleApiKey() {
@@ -1029,6 +1277,173 @@ async function clearGoogleApiKey() {
   setStatus("Google API key removed.");
 }
 
+async function loadMicrosoftTranslatorSettings() {
+  const data = await withPopupContext(
+    () => chrome.storage.local.get(["microsoftTranslatorApiKey", "microsoftTranslatorRegion"]),
+    null
+  );
+  if (!data) return;
+
+  state.microsoftTranslatorApiKey = data.microsoftTranslatorApiKey || "";
+  state.microsoftTranslatorRegion = data.microsoftTranslatorRegion || "";
+  el.microsoftTranslatorApiKey.value = state.microsoftTranslatorApiKey;
+  el.microsoftTranslatorRegion.value = state.microsoftTranslatorRegion;
+}
+
+async function saveMicrosoftTranslatorSettings() {
+  const apiKey = el.microsoftTranslatorApiKey.value.trim();
+  const region = el.microsoftTranslatorRegion.value.trim();
+
+  state.microsoftTranslatorApiKey = apiKey;
+  state.microsoftTranslatorRegion = region;
+
+  await withPopupContext(
+    () =>
+      chrome.storage.local.set({
+        microsoftTranslatorApiKey: apiKey,
+        microsoftTranslatorRegion: region
+      }),
+    null
+  );
+  if (!popupContextAvailable) return;
+
+  setStatus(apiKey ? "Microsoft Translator settings saved." : "Microsoft Translator settings cleared.");
+}
+
+async function clearMicrosoftTranslatorSettings() {
+  state.microsoftTranslatorApiKey = "";
+  state.microsoftTranslatorRegion = "";
+  el.microsoftTranslatorApiKey.value = "";
+  el.microsoftTranslatorRegion.value = "";
+  await withPopupContext(
+    () => chrome.storage.local.remove(["microsoftTranslatorApiKey", "microsoftTranslatorRegion"]),
+    null
+  );
+  if (!popupContextAvailable) return;
+
+  resetSynonymOutput("Add a Microsoft Translator API key in Settings to load synonyms.");
+  setStatus("Microsoft Translator settings removed.");
+}
+
+async function loadSynonymsForCurrentTranslation() {
+  const normalizedText = el.sourceText.value.trim();
+  const sourceLang = state.sourceLang;
+  const targetLang = state.targetLang;
+
+  if (state.synonymsVisible) {
+    hideSynonymPanel();
+    return;
+  }
+
+  if (state.synonymsLoaded) {
+    showCachedSynonymPanel();
+    return;
+  }
+
+  if (!normalizedText || !state.translated.trim()) {
+    resetSynonymOutput(DEFAULT_SYNONYM_MESSAGE);
+    setStatus("Translate text first.", true);
+    return;
+  }
+
+  if (!state.microsoftTranslatorApiKey) {
+    showSynonymPanel();
+    renderSynonymMessage("Add a Microsoft Translator API key in Settings to load synonyms.");
+    setSynonymButtonState({ disabled: false });
+    return;
+  }
+
+  if (!sourceLang || sourceLang === "auto") {
+    showSynonymPanel();
+    renderSynonymMessage("Synonyms need a detected source language.");
+    setSynonymButtonState({ disabled: false });
+    return;
+  }
+
+  if (!targetLang || targetLang === "auto" || sourceLang === targetLang) {
+    showSynonymPanel();
+    renderSynonymMessage("Synonyms are unavailable for this language pair.");
+    setSynonymButtonState({ disabled: false });
+    return;
+  }
+
+  showSynonymPanel();
+  setSynonymButtonState({ disabled: true, loading: true });
+  renderSynonymMessage("Loading synonym suggestions...");
+
+  try {
+    const synonyms = await lookupSourceSynonyms({
+      text: normalizedText,
+      source: sourceLang,
+      target: targetLang,
+      apiKey: state.microsoftTranslatorApiKey,
+      region: state.microsoftTranslatorRegion
+    });
+
+    if (!synonyms.length) {
+      state.synonyms = [];
+      state.synonymsLoaded = true;
+      state.synonymPage = 1;
+      renderSynonymMessage("No synonym suggestions found for this text.");
+      return;
+    }
+
+    const translatedMeanings = await translateTextList({
+      texts: synonyms,
+      source: sourceLang,
+      target: targetLang,
+      apiKey: state.googleApiKey
+    });
+
+    const synonymRows = synonyms.map((synonym, index) => ({
+      sourceText: synonym,
+      translatedText: translatedMeanings[index] || ""
+    }));
+
+    state.synonyms = synonymRows;
+    state.synonymsLoaded = true;
+    state.synonymTargetLang = targetLang;
+    state.synonymPage = 1;
+    renderSynonymResults(synonymRows, targetLang);
+    setStatus("Synonyms loaded.");
+  } catch (error) {
+    const message = String(error?.message || "");
+    const normalizedMessage = message.toLowerCase();
+
+    if (
+      normalizedMessage.includes("dictionary") &&
+      (
+        normalizedMessage.includes("not supported") ||
+        normalizedMessage.includes("unsupported") ||
+        normalizedMessage.includes("language pair") ||
+        normalizedMessage.includes("not valid")
+      )
+    ) {
+      state.synonyms = [];
+      state.synonymsLoaded = true;
+      state.synonymPage = 1;
+      renderSynonymMessage("Synonyms are unavailable for this language pair.");
+      return;
+    }
+
+    if (
+      normalizedMessage.includes("subscription") ||
+      normalizedMessage.includes("authorization") ||
+      normalizedMessage.includes("access denied") ||
+      normalizedMessage.includes("401") ||
+      normalizedMessage.includes("403") ||
+      normalizedMessage.includes("region")
+    ) {
+      renderSynonymMessage("Check the Microsoft Translator key and region in Settings.");
+      return;
+    }
+
+    renderSynonymMessage("Synonyms could not be loaded right now.");
+  } finally {
+    setSynonymButtonState({ disabled: !state.translated.trim() });
+  }
+}
+
 async function translateCurrentText() {
   const text = el.sourceText.value.trim();
   if (!text) {
@@ -1052,20 +1467,28 @@ async function translateCurrentText() {
   setStatus("Translating...");
 
   try {
-    const translated = await translateText({
+    const translation = await translateTextDetailed({
       text,
       source: sourceLang,
       target: targetLang,
       apiKey: state.googleApiKey
     });
 
+    const translated = translation.translatedText || "";
+    const detectedSourceLanguage = translation.detectedSourceLanguage || "";
+    const effectiveSourceLang = sourceLang === "auto" ? detectedSourceLanguage || sourceLang : sourceLang;
+
     state.translated = translated;
-    state.sourceLang = sourceLang;
+    state.sourceLang = effectiveSourceLang;
     state.targetLang = targetLang;
     el.translatedText.value = translated;
     el.saveBtn.disabled = !translated;
+    resetSynonymOutput(READY_SYNONYM_MESSAGE);
+    setSynonymButtonState({ disabled: !translated });
+    schedulePopupResize();
     setStatus("Translation completed.");
   } catch (error) {
+    resetTranslateOutputs();
     setStatus(error?.message || "Translation failed.", true);
   }
 }
@@ -1092,6 +1515,7 @@ async function saveCurrentTranslation() {
   await withPopupContext(() => chrome.storage.local.set({ deckItems: state.deck }), null);
   if (!popupContextAvailable) return;
   renderDeck();
+  showSaveToast("Added to Deck successfully.");
   setStatus("Saved to deck.");
 }
 
@@ -1294,10 +1718,21 @@ function bindEvents() {
 
   bindAsyncEvent(el.translateBtn, "click", translateCurrentText, "Translation failed.");
   bindAsyncEvent(el.saveBtn, "click", saveCurrentTranslation, "Could not save translation.");
+  bindAsyncEvent(el.loadSynonymsBtn, "click", loadSynonymsForCurrentTranslation, "Could not load synonyms.");
+  el.synonymPrevPageBtn.addEventListener("click", () => goToSynonymPage(state.synonymPage - 1));
+  el.synonymNextPageBtn.addEventListener("click", () => goToSynonymPage(state.synonymPage + 1));
   el.swapLangBtn.addEventListener("click", swapSelectedLanguages);
 
-  el.sourceLang.addEventListener("change", updateSwapLanguageButtonState);
-  el.targetLang.addEventListener("change", updateSwapLanguageButtonState);
+  el.sourceText.addEventListener("input", handleTranslateInputsChanged);
+  el.sourceText.addEventListener("keydown", handleSourceTextKeyDown);
+  el.sourceLang.addEventListener("change", () => {
+    updateSwapLanguageButtonState();
+    handleTranslateInputsChanged();
+  });
+  el.targetLang.addEventListener("change", () => {
+    updateSwapLanguageButtonState();
+    handleTranslateInputsChanged();
+  });
 
   el.deckAddManualBtn.addEventListener("click", () => handleDeckToolbarAction("add-manual"));
   bindAsyncEvent(el.deckDeleteToolbarBtn, "click", deleteSelectedDeckItems, "Could not delete deck items.");
@@ -1320,6 +1755,18 @@ function bindEvents() {
 
   bindAsyncEvent(el.saveApiKeyBtn, "click", saveGoogleApiKey, "Could not save API key.");
   bindAsyncEvent(el.clearApiKeyBtn, "click", clearGoogleApiKey, "Could not clear API key.");
+  bindAsyncEvent(
+    el.saveMicrosoftTranslatorBtn,
+    "click",
+    saveMicrosoftTranslatorSettings,
+    "Could not save Microsoft Translator settings."
+  );
+  bindAsyncEvent(
+    el.clearMicrosoftTranslatorBtn,
+    "click",
+    clearMicrosoftTranslatorSettings,
+    "Could not clear Microsoft Translator settings."
+  );
 
   el.deckList.addEventListener("change", (event) => {
     const target = event.target;
@@ -1398,15 +1845,23 @@ function bindEvents() {
 async function init() {
   await initializeDatabase();
   renderLanguages();
+  resetTranslateOutputs();
   el.deckSort.value = state.deckSort;
   bindEvents();
   updateDeckToolbarState();
   switchTab("translate");
-  await Promise.all([refreshDeck(), refreshDatabaseLocationLabel(), loadHighlightSetting(), loadGoogleApiKey()]);
+  await Promise.all([
+    refreshDeck(),
+    refreshDatabaseLocationLabel(),
+    loadHighlightSetting(),
+    loadGoogleApiKey(),
+    loadMicrosoftTranslatorSettings()
+  ]);
   const loadedSelection = await fillTranslateFromActiveTabSelection();
   if (!loadedSelection) {
     setStatus("Ready.");
   }
+  schedulePopupResize();
 }
 
 init().catch((error) => {

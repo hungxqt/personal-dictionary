@@ -329,11 +329,6 @@ function buildHighlightModel(items) {
       terms.add(source);
       addTooltipMeaning(termMeaningSets, source, translated);
     }
-
-    if (translated) {
-      terms.add(translated);
-      addTooltipMeaning(termMeaningSets, translated, source);
-    }
   }
 
   const sortedTerms = [...terms].sort((a, b) => b.length - a.length || a.localeCompare(b));
