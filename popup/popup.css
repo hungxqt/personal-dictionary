@@ -328,6 +328,43 @@ textarea {
   display: none;
 }
 
+.input-clear-btn {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(85, 111, 140, 0.92);
+  background: linear-gradient(180deg, rgba(28, 39, 52, 0.96) 0%, rgba(18, 26, 36, 0.96) 100%);
+  color: #f7fbff;
+  font-size: 13px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  transform: translateY(-50%);
+  box-shadow:
+    0 8px 16px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.input-clear-btn span {
+  display: block;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
+.input-clear-btn:hover:not(:disabled) {
+  border-color: #78c7c0;
+  background: linear-gradient(180deg, rgba(44, 62, 82, 0.98) 0%, rgba(26, 38, 51, 0.98) 100%);
+}
+
+.input-clear-btn[hidden] {
+  display: none;
+}
+
 button {
   cursor: pointer;
   font-weight: 600;
@@ -702,9 +739,16 @@ button:disabled {
   min-width: 0;
 }
 
-.deck-search-pagination-row input {
+.deck-search-input-wrap {
   flex: 1 1 auto;
+  min-width: 0;
+  position: relative;
+}
+
+.deck-search-input-wrap input {
+  width: 100%;
   min-height: 42px;
+  padding-right: 38px;
 }
 
 .deck-toolbar select {

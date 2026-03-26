@@ -156,7 +156,19 @@
             hidden
           />
           <div class="deck-search-pagination-row">
-            <input id="deckSearch" type="text" placeholder="Search in cards" />
+            <div class="deck-search-input-wrap">
+              <input id="deckSearch" type="text" placeholder="Search in cards" />
+              <button
+                id="clearDeckSearchBtn"
+                class="input-clear-btn"
+                type="button"
+                aria-label="Clear deck search"
+                title="Clear deck search"
+                hidden
+              >
+                <span aria-hidden="true">×</span>
+              </button>
+            </div>
             <div class="deck-pagination" aria-label="Deck pagination">
               <button id="deckPrevPageBtn" class="deck-page-btn" type="button" aria-label="Previous page">‹</button>
               <span id="deckPaginationLabel" class="deck-pagination-label">0 - 0 of 0</span>
@@ -220,7 +232,6 @@
             </div>
             <div id="highlightBlockUrlList" class="highlight-block-list" aria-live="polite"></div>
           </div>
-          <button id="applyHighlightToTabBtn">Apply to Current Tab</button>
         </div>
 
         <div class="setting-card">

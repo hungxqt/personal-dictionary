@@ -42,6 +42,7 @@ let highlightCache = createEmptyHighlightCache();
 let inlinePopupState = createInlinePopupState();
 let extensionContextAvailable = true;
 const pageEventController = new AbortController();
+let highlightEventController = null;
 let inlinePopupMeasureElement = null;
 let highlightMutationObserver = null;
 let highlightMutationObserverPauseDepth = 0;
@@ -241,6 +242,7 @@ function invalidateExtensionContext() {
 
   extensionContextAvailable = false;
   pageEventController.abort();
+  stopHighlightRuntime();
   removeExtensionListeners();
   clearScheduledHighlightRun();
   highlightMutationObserverPauseDepth = 0;
@@ -1077,6 +1079,36 @@ function hideTooltip() {
   activeTooltipTarget = null;
 }
 
+function hasActiveHighlightRuntime() {
+  return !!highlightEventController && !highlightEventController.signal.aborted;
+}
+
+function stopHighlightRuntime() {
+  if (hasActiveHighlightRuntime()) {
+    highlightEventController.abort();
+  }
+  highlightEventController = null;
+
+  clearScheduledHighlightRun();
+  clearScheduledIncrementalHighlightRun();
+  pendingIncrementalHighlightRoots = new Set();
+  pendingInteractionDeferredHighlight = false;
+  pendingInteractionDeferredHighlightForce = false;
+  highlightTextCompositionActive = false;
+  highlightUserInteractionUntil = 0;
+  activeHighlightRunId += 1;
+  disconnectHighlightMutationObserver();
+  hideTooltip();
+}
+
+function startHighlightRuntime() {
+  if (hasActiveHighlightRuntime()) return;
+
+  highlightEventController = new AbortController();
+  bindTooltipEvents(highlightEventController.signal);
+  bindHighlightInteractionEvents(highlightEventController.signal);
+}
+
 function positionTooltip(target) {
   if (!tooltipElement || tooltipElement.hidden) return;
   if (!target?.isConnected) {
@@ -1255,37 +1287,8 @@ function bindSelectionActionEvents() {
   }, listenerOptions);
 }
 
-function bindTooltipEvents() {
+function bindSharedUiEvents() {
   const listenerOptions = { signal: pageEventController.signal };
-
-  document.addEventListener("mouseover", (event) => {
-    if (!ensureExtensionContext()) return;
-
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
-
-    const highlight = target.closest(".vocab-highlight");
-    if (!highlight) return;
-
-    showTooltip(highlight);
-  }, listenerOptions);
-
-  document.addEventListener("mouseout", (event) => {
-    if (!ensureExtensionContext()) return;
-
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
-
-    const highlight = target.closest(".vocab-highlight");
-    if (!highlight) return;
-
-    const relatedTarget = event.relatedTarget;
-    if (relatedTarget instanceof HTMLElement && relatedTarget.closest(".vocab-highlight") === highlight) {
-      return;
-    }
-
-    hideTooltip();
-  }, listenerOptions);
 
   window.addEventListener("resize", () => {
     if (!ensureExtensionContext()) return;
@@ -1316,8 +1319,41 @@ function bindTooltipEvents() {
   );
 }
 
-function bindHighlightInteractionEvents() {
-  const listenerOptions = { signal: pageEventController.signal };
+function bindTooltipEvents(signal) {
+  const listenerOptions = { signal };
+
+  document.addEventListener("mouseover", (event) => {
+    if (!ensureExtensionContext()) return;
+
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+
+    const highlight = target.closest(".vocab-highlight");
+    if (!highlight) return;
+
+    showTooltip(highlight);
+  }, listenerOptions);
+
+  document.addEventListener("mouseout", (event) => {
+    if (!ensureExtensionContext()) return;
+
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+
+    const highlight = target.closest(".vocab-highlight");
+    if (!highlight) return;
+
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget instanceof HTMLElement && relatedTarget.closest(".vocab-highlight") === highlight) {
+      return;
+    }
+
+    hideTooltip();
+  }, listenerOptions);
+}
+
+function bindHighlightInteractionEvents(signal) {
+  const listenerOptions = { signal };
 
   const markIfEditableInteraction = (event) => {
     if (!ensureExtensionContext()) return;
@@ -1817,11 +1853,6 @@ async function runHighlight(options = {}) {
   if (!ensureExtensionContext()) return false;
 
   const { force = false, settings } = options;
-  if (shouldDeferHighlightForUserInteraction()) {
-    scheduleHighlightRun({ force });
-    return false;
-  }
-
   suspendHighlightMutationObserver();
 
   try {
@@ -1847,10 +1878,10 @@ async function runHighlight(options = {}) {
 
     if (!enabled) {
       highlightCache = createEmptyHighlightCache(false);
+      stopHighlightRuntime();
       if (enabledChanged || hasAppliedHighlights) {
         unwrapHighlights();
       }
-      disconnectHighlightMutationObserver();
       return false;
     }
 
@@ -1875,6 +1906,19 @@ async function runHighlight(options = {}) {
 
     highlightCache = nextCache;
 
+    if (!nextCache.regex) {
+      stopHighlightRuntime();
+      unwrapHighlights();
+      return false;
+    }
+
+    startHighlightRuntime();
+
+    if (shouldDeferHighlightForUserInteraction()) {
+      scheduleHighlightRun({ force });
+      return false;
+    }
+
     if (!force && !enabledChanged && !matchSignatureChanged) {
       if (tooltipSignatureChanged && activeTooltipTarget) {
         showTooltip(activeTooltipTarget);
@@ -1883,11 +1927,6 @@ async function runHighlight(options = {}) {
     }
 
     unwrapHighlights();
-
-    if (!nextCache.regex) {
-      disconnectHighlightMutationObserver();
-      return false;
-    }
 
     const textNodes = await collectMatchingTextNodes(nextCache.regex, runId);
     if (!textNodes || runId !== activeHighlightRunId) return false;
@@ -1907,9 +1946,8 @@ unwrapHighlights({ force: true });
 runHighlight().catch(() => {
   // Ignore initial highlight failures to avoid breaking the host page.
 });
-bindTooltipEvents();
+bindSharedUiEvents();
 bindSelectionActionEvents();
-bindHighlightInteractionEvents();
 
 rememberCurrentSelection();
 const selectionSyncListenerOptions = { signal: pageEventController.signal };

@@ -225,6 +225,26 @@ async function refreshHighlightForTab(tabId) {
   }
 }
 
+async function refreshHighlightForTabIfEnabled(tabId) {
+  if (!Number.isInteger(tabId)) return;
+
+  try {
+    const settings = await getHighlightSettings();
+    if (!settings.highlightEnabled) return;
+
+    const tab = await chrome.tabs.get(tabId);
+    const pageUrl = normalizeHighlightPageUrl(tab?.url || tab?.pendingUrl || "");
+    if (!pageUrl) return;
+
+    const pageState = resolvePageHighlightState(pageUrl, settings);
+    if (!pageState.effectiveEnabled) return;
+
+    await refreshHighlightForTab(tabId);
+  } catch {
+    // Ignore tabs where refresh eligibility cannot be determined.
+  }
+}
+
 async function refreshHighlightForAllTabs() {
   if (!chrome.tabs?.query) return;
 
@@ -364,7 +384,7 @@ if (chrome.contextMenus?.onShown?.addListener) {
 
 if (chrome.tabs?.onActivated?.addListener) {
   chrome.tabs.onActivated.addListener((activeInfo) => {
-    refreshHighlightForTab(activeInfo.tabId).catch(() => {
+    refreshHighlightForTabIfEnabled(activeInfo.tabId).catch(() => {
       // Ignore active-tab refresh failures.
     });
     updateHighlightContextMenuForActiveTab().catch(() => {
@@ -389,7 +409,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     return;
   }
 
-  if (changes.highlightEnabled || changes.highlightBlockedUrls) {
+  if (changes.highlightEnabled || changes.highlightBlockedUrls || changes[HIGHLIGHT_PAGE_OVERRIDES_KEY]) {
     refreshHighlightForAllTabs().catch(() => {
       // Ignore storage-driven highlight refresh failures.
     });
@@ -464,7 +484,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       targetLang: message.targetLang
     })
       .then(async (item) => {
-        await refreshHighlightForTab(sender.tab?.id);
+        await refreshHighlightForTabIfEnabled(sender.tab?.id);
         sendResponse({ ok: true, item });
       })
       .catch((error) => sendResponse({ ok: false, error: error?.message || "Could not save deck item." }));

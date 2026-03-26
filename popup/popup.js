@@ -114,6 +114,7 @@ const el = {
   exportDeckBtn: document.getElementById("exportDeckBtn"),
   deckImportInput: document.getElementById("deckImportInput"),
   deckList: document.getElementById("deckList"),
+  clearDeckSearchBtn: document.getElementById("clearDeckSearchBtn"),
   deckPrevPageBtn: document.getElementById("deckPrevPageBtn"),
   deckNextPageBtn: document.getElementById("deckNextPageBtn"),
   deckPaginationLabel: document.getElementById("deckPaginationLabel"),
@@ -132,7 +133,6 @@ const el = {
   highlightBlockUrlInput: document.getElementById("highlightBlockUrlInput"),
   addHighlightBlockUrlBtn: document.getElementById("addHighlightBlockUrlBtn"),
   highlightBlockUrlList: document.getElementById("highlightBlockUrlList"),
-  applyHighlightToTabBtn: document.getElementById("applyHighlightToTabBtn"),
   settingsToast: document.getElementById("settingsToast"),
   saveToast: document.getElementById("saveToast"),
   status: document.getElementById("status")
@@ -1178,7 +1178,9 @@ async function saveDeckExportFile(items) {
   return defaultFormat;
 }
 
-function switchTab(tabName) {
+function switchTab(tabName, options = {}) {
+  const { focusDeckSearch = false, focusTranslateInput = false } = options;
+
   el.tabButtons.forEach((btn) => {
     const active = btn.dataset.tab === tabName;
     btn.classList.toggle("active", active);
@@ -1193,6 +1195,14 @@ function switchTab(tabName) {
   }
 
   schedulePopupResize();
+
+  if (tabName === "deck" && focusDeckSearch) {
+    focusDeckSearchInput();
+  }
+
+  if (tabName === "translate" && focusTranslateInput) {
+    focusSourceText(true);
+  }
 }
 
 function focusSourceText(moveCaretToEnd = false) {
@@ -1204,6 +1214,19 @@ function focusSourceText(moveCaretToEnd = false) {
     if (moveCaretToEnd) {
       const caretPosition = el.sourceText.value.length;
       el.sourceText.setSelectionRange(caretPosition, caretPosition);
+    }
+  }, 0);
+}
+
+function focusDeckSearchInput(moveCaretToEnd = true) {
+  window.setTimeout(() => {
+    if (!(el.deckSearch instanceof HTMLInputElement)) return;
+
+    el.deckSearch.focus();
+
+    if (moveCaretToEnd) {
+      const caretPosition = el.deckSearch.value.length;
+      el.deckSearch.setSelectionRange(caretPosition, caretPosition);
     }
   }, 0);
 }
@@ -1222,6 +1245,12 @@ function updateClearSourceTextButtonState() {
   el.clearSourceTextBtn.hidden = !el.sourceText.value.trim();
 }
 
+function updateClearDeckSearchButtonState() {
+  if (!el.clearDeckSearchBtn) return;
+
+  el.clearDeckSearchBtn.hidden = !el.deckSearch.value;
+}
+
 function clearSourceText() {
   if (!el.sourceText.value && !el.translatedText.value && !isEditingDeckItem()) return;
 
@@ -1230,6 +1259,16 @@ function clearSourceText() {
   resetTranslateOutputs();
   updateClearSourceTextButtonState();
   focusSourceText();
+}
+
+function clearDeckSearch() {
+  if (!el.deckSearch.value) return;
+
+  el.deckSearch.value = "";
+  state.deckPage = 1;
+  updateClearDeckSearchButtonState();
+  renderDeck();
+  focusDeckSearchInput(false);
 }
 
 function handleTranslatedTextChanged() {
@@ -1330,6 +1369,11 @@ async function getActiveTab() {
 
 async function refreshHighlightInActiveTab(options = {}) {
   const { showSuccessStatus = false, showFailureStatus = false } = options;
+  const highlightSetting = await withPopupContext(() => chrome.storage.local.get(["highlightEnabled"]), null);
+  if (!highlightSetting || highlightSetting.highlightEnabled === false) {
+    return false;
+  }
+
   const tab = await getActiveTab();
   if (!tab?.id) {
     if (showFailureStatus) {
@@ -2361,10 +2405,6 @@ async function removeHighlightBlockedUrlRule(rule) {
   setStatus("Highlight block rule removed.");
 }
 
-async function applyHighlightToCurrentTab() {
-  await refreshHighlightInActiveTab({ showSuccessStatus: true, showFailureStatus: true });
-}
-
 function focusTranslateInputForManualAdd() {
   if (isEditingDeckItem()) {
     exitDeckEditMode();
@@ -2417,7 +2457,13 @@ function handleFlashcardKeyDown(event) {
 
 function bindEvents() {
   el.tabButtons.forEach((btn) => {
-    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+    btn.addEventListener("click", () => {
+      const tabName = btn.dataset.tab;
+      switchTab(tabName, {
+        focusDeckSearch: tabName === "deck",
+        focusTranslateInput: tabName === "translate"
+      });
+    });
   });
 
   bindAsyncEvent(el.translateBtn, "click", translateCurrentText, "Translation failed.");
@@ -2433,6 +2479,7 @@ function bindEvents() {
   el.synonymNextPageBtn.addEventListener("click", () => goToSynonymPage(state.thesaurusPage + 1));
   el.swapLangBtn.addEventListener("click", swapSelectedLanguages);
   el.clearSourceTextBtn.addEventListener("click", clearSourceText);
+  el.clearDeckSearchBtn.addEventListener("click", clearDeckSearch);
 
   el.sourceText.addEventListener("input", handleTranslateInputsChanged);
   el.translatedText.addEventListener("input", handleTranslatedTextChanged);
@@ -2452,6 +2499,7 @@ function bindEvents() {
   bindAsyncEvent(el.deckPasteToolbarBtn, "click", pasteDeckItems, "Could not paste deck items.");
   el.deckSearch.addEventListener("input", () => {
     state.deckPage = 1;
+    updateClearDeckSearchButtonState();
     renderDeck();
   });
   el.deckSort.addEventListener("change", () => {
@@ -2541,8 +2589,6 @@ function bindEvents() {
       handlePopupAsyncError(error, "Could not remove highlight block rule.");
     });
   });
-
-  bindAsyncEvent(el.applyHighlightToTabBtn, "click", applyHighlightToCurrentTab, "Could not apply highlight.");
   document.addEventListener("keydown", handleFlashcardKeyDown);
 }
 
@@ -2553,6 +2599,7 @@ async function init() {
   updateSaveButtonLabel();
   resetTranslateOutputs();
   updateClearSourceTextButtonState();
+  updateClearDeckSearchButtonState();
   el.deckSort.value = state.deckSort;
   bindEvents();
   updateDeckToolbarState();
