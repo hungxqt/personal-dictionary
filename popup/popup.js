@@ -2280,8 +2280,7 @@ async function saveCurrentTranslation() {
     targetLang: state.targetLang
   });
 
-  const { item: savedItem, revision } = await upsertDeckItem(item);
-  state.selectedDeckIds = new Set([savedItem.id]);
+  const { revision } = await upsertDeckItem(item);
   await syncDeckViewsAfterMutation({
     deckRevision: revision,
     resetDeckPage: true
