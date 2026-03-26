@@ -2,11 +2,16 @@ import { LANGUAGES } from "../lib/languages.js";
 import { lookupSourceAntonyms, lookupSourceSynonyms, translateTextDetailed, translateTextList } from "../lib/translator.js";
 import {
   initializeDatabase,
-  chooseCustomDatabaseFile,
-  useDefaultDatabaseLocation,
+  queryDeckItems,
+  getDeckItem,
+  listAllDeckItems,
+  upsertDeckItem,
+  bulkUpsertDeckItems,
+  replaceDeckItems,
+  deleteDeckItems,
+  chooseDatabaseSyncFile,
+  syncDatabaseToFile,
   getDatabaseLocationInfo,
-  readDeckItems,
-  writeDeckItems,
   createDeckItem
 } from "../lib/database.js";
 
@@ -27,6 +32,7 @@ const state = {
   thesaurusPage: 1,
   thesaurusPageSize: 5,
   deck: [],
+  deckTotalCount: 0,
   selectedDeckIds: new Set(),
   editingDeckItemId: "",
   editingTranslationDraft: false,
@@ -34,7 +40,10 @@ const state = {
   deckSort: "newest",
   deckPage: 1,
   deckPageSize: 10,
+  deckLoadRequestId: 0,
   flashcardOrderMode: "time-desc",
+  flashcardDeck: [],
+  flashcardLoaded: false,
   flashcardSequenceIds: [],
   flashcardIndex: 0,
   flashcardShowingMeaning: false,
@@ -74,6 +83,10 @@ const THESAURUS_SINGULAR_LABELS = {
   synonyms: "Synonym",
   antonyms: "Antonym"
 };
+const AUTO_SYNC_ENABLED_KEY = "dbAutoSyncEnabled";
+const AUTO_SYNC_INTERVAL_MINUTES_KEY = "dbAutoSyncIntervalMinutes";
+const DEFAULT_AUTO_SYNC_INTERVAL_MINUTES = 60;
+const SUPPORTED_AUTO_SYNC_INTERVALS = new Set([5, 15, 30, 60, 180, 360, 720, 1440]);
 
 const el = {
   app: document.querySelector(".app"),
@@ -127,8 +140,11 @@ const el = {
   clearMerriamWebsterBtn: document.getElementById("clearMerriamWebsterBtn"),
   dbSummaryLabel: document.getElementById("dbSummaryLabel"),
   dbLocationLabel: document.getElementById("dbLocationLabel"),
-  useDefaultDbBtn: document.getElementById("useDefaultDbBtn"),
-  chooseDbBtn: document.getElementById("chooseDbBtn"),
+  autoSyncEnabled: document.getElementById("autoSyncEnabled"),
+  autoSyncInterval: document.getElementById("autoSyncInterval"),
+  importDbBtn: document.getElementById("importDbBtn"),
+  chooseDbSyncBtn: document.getElementById("chooseDbSyncBtn"),
+  syncDbBtn: document.getElementById("syncDbBtn"),
   highlightEnabled: document.getElementById("highlightEnabled"),
   highlightBlockUrlInput: document.getElementById("highlightBlockUrlInput"),
   addHighlightBlockUrlBtn: document.getElementById("addHighlightBlockUrlBtn"),
@@ -142,6 +158,11 @@ let popupContextAvailable = true;
 let popupResizeFrame = 0;
 let saveToastTimeoutId = 0;
 let settingsToastTimeoutId = 0;
+
+function normalizeAutoSyncIntervalMinutes(value) {
+  const numericValue = Number(value);
+  return SUPPORTED_AUTO_SYNC_INTERVALS.has(numericValue) ? numericValue : DEFAULT_AUTO_SYNC_INTERVAL_MINUTES;
+}
 
 function isExtensionContextInvalidatedError(error) {
   const message = error?.message || String(error || "");
@@ -1261,13 +1282,13 @@ function clearSourceText() {
   focusSourceText();
 }
 
-function clearDeckSearch() {
+async function clearDeckSearch() {
   if (!el.deckSearch.value) return;
 
   el.deckSearch.value = "";
   state.deckPage = 1;
   updateClearDeckSearchButtonState();
-  renderDeck();
+  await refreshDeck();
   focusDeckSearchInput(false);
 }
 
@@ -1368,7 +1389,7 @@ async function getActiveTab() {
 }
 
 async function refreshHighlightInActiveTab(options = {}) {
-  const { showSuccessStatus = false, showFailureStatus = false } = options;
+  const { showSuccessStatus = false, showFailureStatus = false, deckRevision = null } = options;
   const highlightSetting = await withPopupContext(() => chrome.storage.local.get(["highlightEnabled"]), null);
   if (!highlightSetting || highlightSetting.highlightEnabled === false) {
     return false;
@@ -1383,7 +1404,12 @@ async function refreshHighlightInActiveTab(options = {}) {
   }
 
   try {
-    const response = await withPopupContext(() => chrome.tabs.sendMessage(tab.id, { type: "refresh-highlight" }), null);
+    const message = { type: "refresh-highlight" };
+    if (Number.isInteger(deckRevision)) {
+      message.deckRevision = deckRevision;
+    }
+
+    const response = await withPopupContext(() => chrome.tabs.sendMessage(tab.id, message), null);
     if (!popupContextAvailable) return false;
     if (!response?.ok) {
       throw new Error("Open a normal webpage tab first, then try again.");
@@ -1564,23 +1590,6 @@ function sortDeckItems(items, sortOrder = state.deckSort) {
   return sortedItems;
 }
 
-function getFilteredDeckItems(items = state.deck) {
-  const sortedItems = sortDeckItems(items);
-  const query = el.deckSearch.value.trim().toLowerCase();
-
-  const filteredItems = sortedItems.filter((item) => {
-    if (!query) return true;
-    return (
-      item.sourceText.toLowerCase().includes(query) ||
-      item.translatedText.toLowerCase().includes(query) ||
-      item.sourceLang.toLowerCase().includes(query) ||
-      item.targetLang.toLowerCase().includes(query)
-    );
-  });
-
-  return { filteredItems, query };
-}
-
 function normalizeFlashcardOrderMode(value) {
   return FLASHCARD_ORDER_MODES.has(value) ? value : "time-desc";
 }
@@ -1629,7 +1638,7 @@ function sortFlashcardItems(items, orderMode = state.flashcardOrderMode) {
   return sortedItems;
 }
 
-function buildFlashcardSequence(items = state.deck) {
+function buildFlashcardSequence(items = state.flashcardDeck) {
   const sequenceItems = sortFlashcardItems(items, state.flashcardOrderMode);
   return sequenceItems.map((item) => item.id);
 }
@@ -1638,11 +1647,11 @@ function getCurrentFlashcardItem() {
   const currentId = state.flashcardSequenceIds[state.flashcardIndex];
   if (!currentId) return null;
 
-  return state.deck.find((item) => item.id === currentId) || null;
+  return state.flashcardDeck.find((item) => item.id === currentId) || null;
 }
 
 function ensureFlashcardSequence() {
-  if (!state.deck.length) {
+  if (!state.flashcardDeck.length) {
     state.flashcardSequenceIds = [];
     state.flashcardIndex = 0;
     state.flashcardShowingMeaning = false;
@@ -1650,7 +1659,7 @@ function ensureFlashcardSequence() {
   }
 
   if (!state.flashcardSequenceIds.length) {
-    state.flashcardSequenceIds = buildFlashcardSequence(state.deck);
+    state.flashcardSequenceIds = buildFlashcardSequence(state.flashcardDeck);
     state.flashcardIndex = 0;
   }
 
@@ -1659,7 +1668,7 @@ function ensureFlashcardSequence() {
   }
 
   if (!getCurrentFlashcardItem()) {
-    state.flashcardSequenceIds = buildFlashcardSequence(state.deck);
+    state.flashcardSequenceIds = buildFlashcardSequence(state.flashcardDeck);
     state.flashcardIndex = 0;
   }
 }
@@ -1709,7 +1718,7 @@ function renderFlashcard() {
 }
 
 function resetFlashcardSession() {
-  state.flashcardSequenceIds = buildFlashcardSequence(state.deck);
+  state.flashcardSequenceIds = buildFlashcardSequence(state.flashcardDeck);
   state.flashcardIndex = 0;
   state.flashcardShowingMeaning = false;
   renderFlashcard();
@@ -1723,7 +1732,7 @@ function toggleFlashcardFace() {
 }
 
 function goToFlashcardStep(step) {
-  if (!state.deck.length) {
+  if (!state.flashcardDeck.length) {
     renderFlashcard();
     return;
   }
@@ -1737,6 +1746,25 @@ function goToFlashcardStep(step) {
 
   const totalCards = state.flashcardSequenceIds.length;
   state.flashcardIndex = (state.flashcardIndex + step + totalCards) % totalCards;
+  state.flashcardShowingMeaning = false;
+  renderFlashcard();
+}
+
+async function loadFlashcardDeck(force = false) {
+  if (state.flashcardLoaded && !force) {
+    return;
+  }
+
+  state.flashcardDeck = sortDeckItemsByNewest(await listAllDeckItems());
+  state.flashcardLoaded = true;
+  resetFlashcardSession();
+}
+
+function invalidateFlashcardDeck() {
+  state.flashcardLoaded = false;
+  state.flashcardDeck = [];
+  state.flashcardSequenceIds = [];
+  state.flashcardIndex = 0;
   state.flashcardShowingMeaning = false;
   renderFlashcard();
 }
@@ -1769,20 +1797,17 @@ function updateDeckPagination(totalItems) {
 }
 
 function renderDeck(items = state.deck) {
-  const { filteredItems, query } = getFilteredDeckItems(items);
-  updateDeckPagination(filteredItems.length);
+  const query = el.deckSearch.value.trim();
+  updateDeckPagination(state.deckTotalCount);
 
-  if (!filteredItems.length) {
+  if (!items.length) {
     el.deckList.innerHTML = `<div class="deck-item">${query ? "No matching cards." : "No saved words yet."}</div>`;
     updateDeckToolbarState();
     schedulePopupResize();
     return;
   }
 
-  const startIndex = (state.deckPage - 1) * state.deckPageSize;
-  const pageItems = filteredItems.slice(startIndex, startIndex + state.deckPageSize);
-
-  const html = pageItems
+  const html = items
     .map(
       (item) => {
         const escapedId = escapeHtml(item.id);
@@ -1853,16 +1878,90 @@ function escapeHtml(value) {
 }
 
 async function refreshDeck() {
-  state.deck = sortDeckItemsByNewest(await readDeckItems());
+  const requestId = ++state.deckLoadRequestId;
+  const result = await queryDeckItems({
+    page: state.deckPage,
+    pageSize: state.deckPageSize,
+    sort: state.deckSort,
+    query: el.deckSearch.value
+  });
+
+  if (requestId !== state.deckLoadRequestId) {
+    return;
+  }
+
+  const totalPages = result.total > 0 ? Math.ceil(result.total / state.deckPageSize) : 1;
+  if (result.total > 0 && state.deckPage > totalPages) {
+    state.deckPage = totalPages;
+    await refreshDeck();
+    return;
+  }
+
+  state.deck = result.items;
+  state.deckTotalCount = result.total;
   pruneDeckSelection();
   renderDeck();
-  resetFlashcardSession();
+}
+
+async function syncDeckViewsAfterMutation(options = {}) {
+  const { deckRevision = null, resetDeckPage = false } = options;
+
+  if (resetDeckPage) {
+    state.deckPage = 1;
+  }
+
+  await refreshDeck();
+
+  if (getActivePopupTabName() === "flashcards") {
+    await loadFlashcardDeck(true);
+  } else {
+    invalidateFlashcardDeck();
+  }
+
+  await refreshHighlightInActiveTab({ deckRevision });
 }
 
 async function refreshDatabaseLocationLabel() {
   const info = await getDatabaseLocationInfo();
-  el.dbSummaryLabel.textContent = info.summary;
+  el.dbSummaryLabel.textContent = info.notice ? `${info.summary} ${info.notice}` : info.summary;
   el.dbLocationLabel.textContent = info.detail;
+}
+
+function updateAutoSyncControls() {
+  if (el.autoSyncInterval) {
+    el.autoSyncInterval.disabled = !el.autoSyncEnabled?.checked;
+  }
+}
+
+async function loadAutoSyncSettings() {
+  const data = await withPopupContext(
+    () => chrome.storage.local.get([AUTO_SYNC_ENABLED_KEY, AUTO_SYNC_INTERVAL_MINUTES_KEY]),
+    null
+  );
+
+  const enabled = data?.[AUTO_SYNC_ENABLED_KEY] === true;
+  const intervalMinutes = normalizeAutoSyncIntervalMinutes(data?.[AUTO_SYNC_INTERVAL_MINUTES_KEY]);
+
+  if (el.autoSyncEnabled) {
+    el.autoSyncEnabled.checked = enabled;
+  }
+  if (el.autoSyncInterval) {
+    el.autoSyncInterval.value = String(intervalMinutes);
+  }
+
+  updateAutoSyncControls();
+}
+
+async function saveAutoSyncSettings({ enabled, intervalMinutes }) {
+  const nextIntervalMinutes = normalizeAutoSyncIntervalMinutes(intervalMinutes);
+  await withPopupContext(
+    () =>
+      chrome.storage.local.set({
+        [AUTO_SYNC_ENABLED_KEY]: enabled,
+        [AUTO_SYNC_INTERVAL_MINUTES_KEY]: nextIntervalMinutes
+      }),
+    null
+  );
 }
 
 async function loadFlashcardSettings() {
@@ -1873,7 +1972,7 @@ async function loadFlashcardSettings() {
   }
 
   state.flashcardOrderMode = normalizeFlashcardOrderMode(data.flashcardOrderMode);
-  resetFlashcardSession();
+  renderFlashcard();
 }
 
 async function saveFlashcardOrderMode() {
@@ -2175,8 +2274,8 @@ async function saveCurrentTranslation() {
   }
 
   if (isEditingDeckItem()) {
-    const editingItemIndex = state.deck.findIndex((item) => item.id === state.editingDeckItemId);
-    if (editingItemIndex === -1) {
+    const existingItem = await getDeckItem(state.editingDeckItemId);
+    if (!existingItem) {
       exitDeckEditMode();
       resetTranslateOutputs();
       updateClearSourceTextButtonState();
@@ -2184,7 +2283,6 @@ async function saveCurrentTranslation() {
       return;
     }
 
-    const existingItem = state.deck[editingItemIndex];
     const updatedItem = {
       ...existingItem,
       sourceText,
@@ -2193,20 +2291,15 @@ async function saveCurrentTranslation() {
       targetLang: state.targetLang
     };
 
-    state.deck = sortDeckItemsByNewest(
-      state.deck.map((item) => (item.id === updatedItem.id ? updatedItem : item))
-    );
-    state.selectedDeckIds = new Set([updatedItem.id]);
-    await writeDeckItems(state.deck);
-    await refreshHighlightInActiveTab();
+    const { item: savedItem, revision } = await upsertDeckItem(updatedItem);
+    state.selectedDeckIds = new Set([savedItem.id]);
+    await syncDeckViewsAfterMutation({ deckRevision: revision });
     if (!popupContextAvailable) return;
 
     exitDeckEditMode();
     el.sourceText.value = "";
     resetTranslateOutputs();
     updateClearSourceTextButtonState();
-    renderDeck();
-    resetFlashcardSession();
     switchTab("deck");
     showSaveToast("Deck item updated.");
     setStatus("Deck item updated.");
@@ -2220,13 +2313,13 @@ async function saveCurrentTranslation() {
     targetLang: state.targetLang
   });
 
-  state.deck = sortDeckItemsByNewest([item, ...state.deck]);
-  state.deckPage = 1;
-  await writeDeckItems(state.deck);
-  await refreshHighlightInActiveTab();
+  const { item: savedItem, revision } = await upsertDeckItem(item);
+  state.selectedDeckIds = new Set([savedItem.id]);
+  await syncDeckViewsAfterMutation({
+    deckRevision: revision,
+    resetDeckPage: true
+  });
   if (!popupContextAvailable) return;
-  renderDeck();
-  resetFlashcardSession();
   showSaveToast("Added to Deck successfully.");
   setStatus("Saved to deck.");
 }
@@ -2247,7 +2340,7 @@ function updateDeckToolbarState() {
   const selectedCount = state.selectedDeckIds.size;
   const hasSelection = selectedCount > 0;
   const hasClipboard = state.deckClipboard.length > 0;
-  const hasDeckItems = state.deck.length > 0;
+  const hasDeckItems = state.deckTotalCount > 0;
 
   el.deckDeleteToolbarBtn.disabled = !hasSelection;
   el.deckModifyToolbarBtn.disabled = selectedCount !== 1;
@@ -2272,14 +2365,6 @@ function editSelectedDeckItem() {
   setStatus("Editing selected deck item.");
 }
 
-async function persistDeckState() {
-  await writeDeckItems(state.deck);
-  await refreshHighlightInActiveTab();
-  if (!popupContextAvailable) return;
-  renderDeck();
-  resetFlashcardSession();
-}
-
 async function importDeckItems() {
   const file = await chooseDeckImportFile();
   const fileText = await file.text();
@@ -2289,7 +2374,8 @@ async function importDeckItems() {
     throw new Error("No valid cards found in the selected file.");
   }
 
-  const { mergedDeck, importedCount, skippedCount } = mergeImportedDeckItems(state.deck, importedItems);
+  const existingItems = await listAllDeckItems();
+  const { mergedDeck, importedCount, skippedCount } = mergeImportedDeckItems(existingItems, importedItems);
   if (!importedCount) {
     setStatus(
       skippedCount ? "No new cards imported. Matching cards were skipped." : "No valid cards found in the selected file.",
@@ -2298,10 +2384,12 @@ async function importDeckItems() {
     return;
   }
 
-  state.deck = sortDeckItemsByNewest(mergedDeck);
-  state.deckPage = 1;
-  pruneDeckSelection();
-  await persistDeckState();
+  state.selectedDeckIds.clear();
+  const { revision } = await replaceDeckItems(mergedDeck);
+  await syncDeckViewsAfterMutation({
+    deckRevision: revision,
+    resetDeckPage: true
+  });
   if (!popupContextAvailable) return;
 
   const formatLabel = DECK_TRANSFER_FORMATS[detectedFormat]?.label || "file";
@@ -2310,12 +2398,12 @@ async function importDeckItems() {
 }
 
 async function exportDeckItems() {
-  if (!state.deck.length) {
+  const exportItems = sortDeckItemsByNewest(await listAllDeckItems());
+  if (!exportItems.length) {
     setStatus("No cards to export.", true);
     return;
   }
 
-  const exportItems = sortDeckItemsByNewest(state.deck);
   const format = await saveDeckExportFile(exportItems);
   if (!popupContextAvailable) return;
 
@@ -2327,7 +2415,8 @@ async function deleteSelectedDeckItems() {
   if (!selectedCount) return;
 
   const editingItemDeleted = isEditingDeckItem() && state.selectedDeckIds.has(state.editingDeckItemId);
-  state.deck = sortDeckItemsByNewest(state.deck.filter((item) => !state.selectedDeckIds.has(item.id)));
+  const selectedIds = [...state.selectedDeckIds];
+  const { revision } = await deleteDeckItems(selectedIds);
   state.selectedDeckIds.clear();
   if (editingItemDeleted) {
     exitDeckEditMode();
@@ -2335,8 +2424,7 @@ async function deleteSelectedDeckItems() {
     resetTranslateOutputs();
     updateClearSourceTextButtonState();
   }
-  pruneDeckSelection();
-  await persistDeckState();
+  await syncDeckViewsAfterMutation({ deckRevision: revision });
   setStatus(`${formatItemCountLabel(selectedCount)} deleted.`);
 }
 
@@ -2344,11 +2432,12 @@ async function pasteDeckItems() {
   if (!state.deckClipboard.length) return;
 
   const clipboardItems = state.deckClipboard.map((item) => ({ ...item }));
-  state.deck = sortDeckItemsByNewest([...clipboardItems, ...state.deck]);
+  const { revision } = await bulkUpsertDeckItems(clipboardItems);
   state.deckClipboard = [];
-  state.deckPage = 1;
-  pruneDeckSelection();
-  await persistDeckState();
+  await syncDeckViewsAfterMutation({
+    deckRevision: revision,
+    resetDeckPage: true
+  });
   setStatus(`${formatItemCountLabel(clipboardItems.length)} pasted.`);
 }
 
@@ -2425,9 +2514,9 @@ function handleDeckToolbarAction(action) {
   }
 }
 
-function goToDeckPage(nextPage) {
+async function goToDeckPage(nextPage) {
   state.deckPage = Math.max(1, nextPage);
-  renderDeck();
+  await refreshDeck();
 }
 
 function handleFlashcardKeyDown(event) {
@@ -2463,6 +2552,12 @@ function bindEvents() {
         focusDeckSearch: tabName === "deck",
         focusTranslateInput: tabName === "translate"
       });
+
+      if (tabName === "flashcards") {
+        Promise.resolve(loadFlashcardDeck()).catch((error) => {
+          handlePopupAsyncError(error, "Could not load flashcards.");
+        });
+      }
     });
   });
 
@@ -2479,7 +2574,7 @@ function bindEvents() {
   el.synonymNextPageBtn.addEventListener("click", () => goToSynonymPage(state.thesaurusPage + 1));
   el.swapLangBtn.addEventListener("click", swapSelectedLanguages);
   el.clearSourceTextBtn.addEventListener("click", clearSourceText);
-  el.clearDeckSearchBtn.addEventListener("click", clearDeckSearch);
+  bindAsyncEvent(el.clearDeckSearchBtn, "click", clearDeckSearch, "Could not clear deck search.");
 
   el.sourceText.addEventListener("input", handleTranslateInputsChanged);
   el.translatedText.addEventListener("input", handleTranslatedTextChanged);
@@ -2500,16 +2595,20 @@ function bindEvents() {
   el.deckSearch.addEventListener("input", () => {
     state.deckPage = 1;
     updateClearDeckSearchButtonState();
-    renderDeck();
+    Promise.resolve(refreshDeck()).catch((error) => {
+      handlePopupAsyncError(error, "Could not search deck items.");
+    });
   });
   el.deckSort.addEventListener("change", () => {
     state.deckSort = el.deckSort.value;
     state.deckPage = 1;
-    renderDeck();
+    Promise.resolve(refreshDeck()).catch((error) => {
+      handlePopupAsyncError(error, "Could not update deck sort.");
+    });
     renderFlashcard();
   });
-  el.deckPrevPageBtn.addEventListener("click", () => goToDeckPage(state.deckPage - 1));
-  el.deckNextPageBtn.addEventListener("click", () => goToDeckPage(state.deckPage + 1));
+  bindAsyncEvent(el.deckPrevPageBtn, "click", () => goToDeckPage(state.deckPage - 1), "Could not load the previous deck page.");
+  bindAsyncEvent(el.deckNextPageBtn, "click", () => goToDeckPage(state.deckPage + 1), "Could not load the next deck page.");
   bindAsyncEvent(el.refreshDeckBtn, "click", refreshDeck, "Could not refresh deck.");
   bindAsyncEvent(el.importDeckBtn, "click", importDeckItems, "Could not import deck file.");
   bindAsyncEvent(el.exportDeckBtn, "click", exportDeckItems, "Could not export deck file.");
@@ -2542,27 +2641,70 @@ function bindEvents() {
     }
   });
 
-  bindAsyncEvent(el.useDefaultDbBtn, "click", async () => {
+  bindAsyncEvent(el.importDbBtn, "click", async () => {
     try {
-      await useDefaultDatabaseLocation();
+      await importDeckItems();
       await refreshDatabaseLocationLabel();
-      await refreshDeck();
-      setStatus("Switched to default database location.");
     } catch (error) {
-      setStatus(error?.message || "Failed to switch database.", true);
+      setStatus(error?.message || "Could not import database file.", true);
     }
-  }, "Failed to switch database.");
+  }, "Could not import database file.");
 
-  bindAsyncEvent(el.chooseDbBtn, "click", async () => {
+  bindAsyncEvent(el.chooseDbSyncBtn, "click", async () => {
     try {
-      await chooseCustomDatabaseFile();
+      await chooseDatabaseSyncFile();
       await refreshDatabaseLocationLabel();
-      await refreshDeck();
-      setStatus("Custom database selected successfully.");
+      setStatus("Database sync file selected successfully.");
     } catch (error) {
-      setStatus(error?.message || "Could not select custom database.", true);
+      setStatus(error?.message || "Could not select database sync file.", true);
     }
-  }, "Could not select custom database.");
+  }, "Could not select database sync file.");
+
+  bindAsyncEvent(el.syncDbBtn, "click", async () => {
+    try {
+      const result = await syncDatabaseToFile();
+      await refreshDatabaseLocationLabel();
+      setStatus(`Synced ${formatItemCountLabel(result.count)} to ${result.fileName}.`);
+    } catch (error) {
+      setStatus(error?.message || "Could not sync database file.", true);
+    }
+  }, "Could not sync database file.");
+
+  bindAsyncEvent(el.autoSyncEnabled, "change", async () => {
+    const enabled = !!el.autoSyncEnabled.checked;
+    const intervalMinutes = normalizeAutoSyncIntervalMinutes(el.autoSyncInterval.value);
+
+    if (enabled) {
+      const info = await getDatabaseLocationInfo();
+      if (!info?.hasSyncFile) {
+        el.autoSyncEnabled.checked = false;
+        updateAutoSyncControls();
+        setStatus("Choose a sync file before enabling automatic sync.", true);
+        return;
+      }
+    }
+
+    await saveAutoSyncSettings({ enabled, intervalMinutes });
+    updateAutoSyncControls();
+    setStatus(
+      enabled
+        ? `Automatic database sync enabled every ${intervalMinutes} minute${intervalMinutes === 1 ? "" : "s"}.`
+        : "Automatic database sync disabled."
+    );
+  }, "Could not update automatic sync.");
+
+  bindAsyncEvent(el.autoSyncInterval, "change", async () => {
+    const intervalMinutes = normalizeAutoSyncIntervalMinutes(el.autoSyncInterval.value);
+    el.autoSyncInterval.value = String(intervalMinutes);
+    await saveAutoSyncSettings({
+      enabled: !!el.autoSyncEnabled.checked,
+      intervalMinutes
+    });
+    updateAutoSyncControls();
+    if (el.autoSyncEnabled.checked) {
+      setStatus(`Automatic database sync interval updated to ${intervalMinutes} minutes.`);
+    }
+  }, "Could not update automatic sync interval.");
 
   bindAsyncEvent(el.highlightEnabled, "change", async () => {
     await saveHighlightSetting(el.highlightEnabled.checked);
@@ -2607,6 +2749,7 @@ async function init() {
   await Promise.all([
     refreshDeck(),
     refreshDatabaseLocationLabel(),
+    loadAutoSyncSettings(),
     loadFlashcardSettings(),
     loadHighlightSetting(),
     loadGoogleApiKey(),

@@ -152,6 +152,7 @@ function getHighlightPageOverrideForCurrentPage(overrides) {
 function createEmptyHighlightCache(enabled = null) {
   return {
     enabled,
+    deckRevision: -1,
     matchSignature: "",
     tooltipSignature: "",
     regex: null,
@@ -524,6 +525,23 @@ function buildHighlightModel(items) {
       .join("\u0001"),
     regex: pattern ? new RegExp(`(${pattern})`, "giu") : null,
     termMeanings: new Map(sortedMeaningEntries)
+  };
+}
+
+async function loadHighlightLexiconFromExtension(sinceRevision = null) {
+  const message = { type: "get-highlight-lexicon" };
+  if (Number.isInteger(sinceRevision)) {
+    message.sinceRevision = sinceRevision;
+  }
+
+  const response = await withExtensionContext(() => chrome.runtime.sendMessage(message), null);
+  if (!response?.ok) {
+    return null;
+  }
+
+  return {
+    revision: Number.isInteger(response.revision) ? response.revision : -1,
+    entries: Array.isArray(response.entries) ? response.entries : null
   };
 }
 
@@ -1852,7 +1870,7 @@ function scheduleHighlightRun(options = {}) {
 async function runHighlight(options = {}) {
   if (!ensureExtensionContext()) return false;
 
-  const { force = false, settings } = options;
+  const { force = false, settings, deckRevision = null } = options;
   suspendHighlightMutationObserver();
 
   try {
@@ -1874,10 +1892,14 @@ async function runHighlight(options = {}) {
     const enabledByRule = !isHighlightBlockedOnCurrentPage(resolvedSettings.highlightBlockedUrls || []);
     const enabled = resolvedSettings.highlightEnabled !== false && (pageOverride === null ? enabledByRule : pageOverride);
 
-    const enabledChanged = enabled !== highlightCache.enabled;
+    const previousCache = highlightCache;
+    const enabledChanged = enabled !== previousCache.enabled;
 
     if (!enabled) {
-      highlightCache = createEmptyHighlightCache(false);
+      highlightCache = {
+        ...previousCache,
+        enabled: false
+      };
       stopHighlightRuntime();
       if (enabledChanged || hasAppliedHighlights) {
         unwrapHighlights();
@@ -1885,24 +1907,50 @@ async function runHighlight(options = {}) {
       return false;
     }
 
-    const resolvedDeckData =
-      Array.isArray(settings?.deckItems)
-        ? { deckItems: settings.deckItems }
-        : await withExtensionContext(() => chrome.storage.local.get(["deckItems"]), null);
-    if (!resolvedDeckData) return false;
-    if (runId !== activeHighlightRunId) return false;
-
-    const nextModel = buildHighlightModel(resolvedDeckData.deckItems || []);
-    const nextCache = {
-      enabled,
-      matchSignature: nextModel.matchSignature,
-      tooltipSignature: nextModel.tooltipSignature,
-      regex: nextModel.regex,
-      termMeanings: nextModel.termMeanings
+    let nextCache = {
+      ...previousCache,
+      enabled
     };
 
-    const matchSignatureChanged = nextCache.matchSignature !== highlightCache.matchSignature;
-    const tooltipSignatureChanged = nextCache.tooltipSignature !== highlightCache.tooltipSignature;
+    if (Array.isArray(settings?.highlightEntries)) {
+      const nextModel = buildHighlightModel(settings.highlightEntries);
+      nextCache = {
+        enabled,
+        deckRevision: Number.isInteger(deckRevision) ? deckRevision : previousCache.deckRevision,
+        matchSignature: nextModel.matchSignature,
+        tooltipSignature: nextModel.tooltipSignature,
+        regex: nextModel.regex,
+        termMeanings: nextModel.termMeanings
+      };
+    } else if (
+      previousCache.deckRevision < 0 ||
+      (Number.isInteger(deckRevision) && deckRevision !== previousCache.deckRevision)
+    ) {
+      const lexiconResponse = await loadHighlightLexiconFromExtension(previousCache.deckRevision);
+      if (!lexiconResponse) return false;
+      if (runId !== activeHighlightRunId) return false;
+
+      if (Array.isArray(lexiconResponse.entries)) {
+        const nextModel = buildHighlightModel(lexiconResponse.entries);
+        nextCache = {
+          enabled,
+          deckRevision: lexiconResponse.revision,
+          matchSignature: nextModel.matchSignature,
+          tooltipSignature: nextModel.tooltipSignature,
+          regex: nextModel.regex,
+          termMeanings: nextModel.termMeanings
+        };
+      } else {
+        nextCache = {
+          ...previousCache,
+          enabled,
+          deckRevision: lexiconResponse.revision
+        };
+      }
+    }
+
+    const matchSignatureChanged = nextCache.matchSignature !== previousCache.matchSignature;
+    const tooltipSignatureChanged = nextCache.tooltipSignature !== previousCache.tooltipSignature;
 
     highlightCache = nextCache;
 
@@ -1920,7 +1968,7 @@ async function runHighlight(options = {}) {
     }
 
     if (!force && !enabledChanged && !matchSignatureChanged) {
-      if (tooltipSignatureChanged && activeTooltipTarget) {
+      if ((tooltipSignatureChanged || enabledChanged) && activeTooltipTarget) {
         showTooltip(activeTooltipTarget);
       }
       return hasAppliedHighlights;
@@ -1965,7 +2013,10 @@ function handleRuntimeMessage(message, _sender, sendResponse) {
   }
 
   if (message?.type === "refresh-highlight") {
-    runHighlight({ force: true })
+    runHighlight({
+      force: true,
+      deckRevision: Number.isInteger(message.deckRevision) ? message.deckRevision : null
+    })
       .then(() => sendResponse({ ok: true }))
       .catch(() => sendResponse({ ok: false }));
     return true;

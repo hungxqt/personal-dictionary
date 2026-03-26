@@ -1,5 +1,13 @@
 import { translateTextDetailed } from "../lib/translator.js";
-import { initializeDatabase, readDeckItems, writeDeckItems, createDeckItem } from "../lib/database.js";
+import {
+  initializeDatabase,
+  listAllDeckItems,
+  upsertDeckItem,
+  createDeckItem,
+  getHighlightLexicon,
+  getDeckRevision,
+  syncDatabaseToFile
+} from "../lib/database.js";
 
 const LAST_SELECTION_KEY = "lastTabSelection";
 const DEFAULT_INLINE_TARGET_LANG = "vi";
@@ -7,8 +15,18 @@ const HIGHLIGHT_CONTEXT_MENU_ID = "toggle-highlight-current-page";
 const HIGHLIGHT_PAGE_OVERRIDES_KEY = "highlightPageOverrides";
 const HIGHLIGHT_STORAGE_KEYS = ["highlightEnabled", "highlightBlockedUrls", HIGHLIGHT_PAGE_OVERRIDES_KEY];
 const SUPPORTED_HIGHLIGHT_PAGE_PROTOCOLS = new Set(["http:", "https:", "file:"]);
+const AUTO_SYNC_ENABLED_KEY = "dbAutoSyncEnabled";
+const AUTO_SYNC_INTERVAL_MINUTES_KEY = "dbAutoSyncIntervalMinutes";
+const AUTO_SYNC_ALARM_NAME = "database-auto-sync";
+const DEFAULT_AUTO_SYNC_INTERVAL_MINUTES = 60;
+const SUPPORTED_AUTO_SYNC_INTERVALS = new Set([5, 15, 30, 60, 180, 360, 720, 1440]);
 
 let databaseReady = null;
+let highlightContextMenuReady = null;
+let highlightLexiconCache = {
+  revision: -1,
+  entries: null
+};
 
 async function setLastSelection(tabId, text) {
   if (!Number.isInteger(tabId)) return;
@@ -27,6 +45,11 @@ async function setLastSelection(tabId, text) {
 
 function normalizeText(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function normalizeAutoSyncIntervalMinutes(value) {
+  const numericValue = Number(value);
+  return SUPPORTED_AUTO_SYNC_INTERVALS.has(numericValue) ? numericValue : DEFAULT_AUTO_SYNC_INTERVAL_MINUTES;
 }
 
 function normalizeHighlightBlockedUrlRule(value) {
@@ -129,6 +152,42 @@ async function getHighlightSettings() {
   };
 }
 
+async function getAutoSyncSettings() {
+  const data = await chrome.storage.local.get([AUTO_SYNC_ENABLED_KEY, AUTO_SYNC_INTERVAL_MINUTES_KEY]);
+  return {
+    enabled: data[AUTO_SYNC_ENABLED_KEY] === true,
+    intervalMinutes: normalizeAutoSyncIntervalMinutes(data[AUTO_SYNC_INTERVAL_MINUTES_KEY])
+  };
+}
+
+async function updateAutoSyncAlarm() {
+  if (!chrome.alarms?.clear || !chrome.alarms?.create) return;
+
+  const settings = await getAutoSyncSettings();
+  await chrome.alarms.clear(AUTO_SYNC_ALARM_NAME);
+  if (!settings.enabled) {
+    return;
+  }
+
+  chrome.alarms.create(AUTO_SYNC_ALARM_NAME, {
+    delayInMinutes: settings.intervalMinutes,
+    periodInMinutes: settings.intervalMinutes
+  });
+}
+
+async function runAutomaticDatabaseSync() {
+  const settings = await getAutoSyncSettings();
+  if (!settings.enabled) return;
+
+  await ensureDatabaseInitialized();
+
+  try {
+    await syncDatabaseToFile({ requestPermission: false });
+  } catch {
+    // Ignore automatic sync failures; manual sync in the popup can recover permission or file issues.
+  }
+}
+
 function resolvePageHighlightState(pageUrl, settings) {
   const blockedByRule = isHighlightBlockedOnPage(pageUrl, settings.highlightBlockedUrls);
   const pageOverride = getPageHighlightOverride(pageUrl, settings.highlightPageOverrides);
@@ -156,25 +215,53 @@ function createChromeApiPromise(callbackInvoker) {
   });
 }
 
-async function ensureHighlightContextMenu() {
-  try {
-    await createChromeApiPromise((done) => chrome.contextMenus.remove(HIGHLIGHT_CONTEXT_MENU_ID, done));
-  } catch {
-    // Ignore missing-item removal failures.
+function ensureHighlightContextMenu() {
+  if (!highlightContextMenuReady) {
+    highlightContextMenuReady = (async () => {
+      try {
+        await createChromeApiPromise((done) => chrome.contextMenus.remove(HIGHLIGHT_CONTEXT_MENU_ID, done));
+      } catch {
+        // Ignore missing-item removal failures.
+      }
+
+      try {
+        await createChromeApiPromise((done) =>
+          chrome.contextMenus.create(
+            {
+              id: HIGHLIGHT_CONTEXT_MENU_ID,
+              title: "Highlight current page",
+              contexts: ["action"],
+              type: "checkbox",
+              checked: true
+            },
+            done
+          )
+        );
+      } catch (error) {
+        const message = error?.message || String(error || "");
+        if (!message.includes("duplicate id")) {
+          throw error;
+        }
+
+        await createChromeApiPromise((done) =>
+          chrome.contextMenus.update(
+            HIGHLIGHT_CONTEXT_MENU_ID,
+            {
+              title: "Highlight current page",
+              enabled: true,
+              checked: true
+            },
+            done
+          )
+        );
+      }
+    })().catch((error) => {
+      highlightContextMenuReady = null;
+      throw error;
+    });
   }
 
-  await createChromeApiPromise((done) =>
-    chrome.contextMenus.create(
-      {
-        id: HIGHLIGHT_CONTEXT_MENU_ID,
-        title: "Highlight current page",
-        contexts: ["action"],
-        type: "checkbox",
-        checked: true
-      },
-      done
-    )
-  );
+  return highlightContextMenuReady;
 }
 
 async function updateHighlightContextMenu(info = {}, tab) {
@@ -215,20 +302,26 @@ async function updateHighlightContextMenu(info = {}, tab) {
   }
 }
 
-async function refreshHighlightForTab(tabId) {
+async function refreshHighlightForTab(tabId, options = {}) {
   if (!Number.isInteger(tabId)) return;
 
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "refresh-highlight" });
+    const message = { type: "refresh-highlight" };
+    if (Number.isInteger(options.deckRevision)) {
+      message.deckRevision = options.deckRevision;
+    }
+
+    await chrome.tabs.sendMessage(tabId, message);
   } catch {
     // Ignore tabs where the content script is unavailable.
   }
 }
 
-async function refreshHighlightForTabIfEnabled(tabId) {
+async function refreshHighlightForTabIfEnabled(tabId, options = {}) {
   if (!Number.isInteger(tabId)) return;
 
   try {
+    await ensureDatabaseInitialized();
     const settings = await getHighlightSettings();
     if (!settings.highlightEnabled) return;
 
@@ -239,22 +332,33 @@ async function refreshHighlightForTabIfEnabled(tabId) {
     const pageState = resolvePageHighlightState(pageUrl, settings);
     if (!pageState.effectiveEnabled) return;
 
-    await refreshHighlightForTab(tabId);
+    const nextOptions = { ...options };
+    if (!Number.isInteger(nextOptions.deckRevision)) {
+      nextOptions.deckRevision = await getDeckRevision();
+    }
+
+    await refreshHighlightForTab(tabId, nextOptions);
   } catch {
     // Ignore tabs where refresh eligibility cannot be determined.
   }
 }
 
-async function refreshHighlightForAllTabs() {
+async function refreshHighlightForAllTabs(options = {}) {
   if (!chrome.tabs?.query) return;
 
   try {
+    const nextOptions = { ...options };
+    if (!Number.isInteger(nextOptions.deckRevision)) {
+      await ensureDatabaseInitialized();
+      nextOptions.deckRevision = await getDeckRevision();
+    }
+
     const tabs = await chrome.tabs.query({});
     await Promise.all(
       tabs
         .map((tab) => tab.id)
         .filter(Number.isInteger)
-        .map((tabId) => refreshHighlightForTab(tabId))
+        .map((tabId) => refreshHighlightForTab(tabId, nextOptions))
     );
   } catch {
     // Ignore best-effort refresh failures across tabs.
@@ -341,23 +445,55 @@ async function saveInlineDeckItem({ sourceText, translatedText, sourceLang, targ
     throw new Error("Source text and translated text are required.");
   }
 
-  const existingItems = await readDeckItems();
   const nextItem = createDeckItem({
     sourceText: normalizedSourceText,
     translatedText: normalizedTranslatedText,
     sourceLang: normalizedSourceLang,
     targetLang: normalizedTargetLang
   });
-  const nextDeck = [nextItem, ...existingItems];
+  const result = await upsertDeckItem(nextItem);
+  highlightLexiconCache = {
+    revision: -1,
+    entries: null
+  };
 
-  await writeDeckItems(nextDeck, { allowStorageFallback: true });
+  return result;
+}
 
-  return nextItem;
+async function loadHighlightLexicon(sinceRevision = null) {
+  await ensureDatabaseInitialized();
+
+  const currentRevision = await getDeckRevision();
+  if (Number.isInteger(sinceRevision) && sinceRevision === currentRevision) {
+    return {
+      revision: currentRevision,
+      entries: null
+    };
+  }
+
+  if (highlightLexiconCache.revision === currentRevision && Array.isArray(highlightLexiconCache.entries)) {
+    return {
+      revision: currentRevision,
+      entries: highlightLexiconCache.entries
+    };
+  }
+
+  const result = await getHighlightLexicon();
+  highlightLexiconCache = {
+    revision: result.revision,
+    entries: Array.isArray(result.entries) ? result.entries : []
+  };
+
+  return {
+    revision: result.revision,
+    entries: highlightLexiconCache.entries
+  };
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureHighlightContextMenu();
   await ensureDatabaseInitialized();
+  await updateAutoSyncAlarm();
   const existing = await chrome.storage.local.get(["highlightEnabled"]);
   if (typeof existing.highlightEnabled !== "boolean") {
     await chrome.storage.local.set({ highlightEnabled: true });
@@ -368,6 +504,9 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(() => {
   ensureHighlightContextMenu().catch(() => {
     // Ignore context menu recreation failures on startup.
+  });
+  updateAutoSyncAlarm().catch(() => {
+    // Ignore automatic sync alarm setup failures on startup.
   });
   updateHighlightContextMenuForActiveTab().catch(() => {
     // Ignore menu sync failures on startup.
@@ -405,19 +544,29 @@ if (chrome.tabs?.onUpdated?.addListener) {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
-  if (!changes.highlightEnabled && !changes.highlightBlockedUrls && !changes[HIGHLIGHT_PAGE_OVERRIDES_KEY]) {
-    return;
-  }
+  const highlightSettingsChanged =
+    Boolean(changes.highlightEnabled) ||
+    Boolean(changes.highlightBlockedUrls) ||
+    Boolean(changes[HIGHLIGHT_PAGE_OVERRIDES_KEY]);
+  const autoSyncSettingsChanged = Boolean(changes[AUTO_SYNC_ENABLED_KEY]) || Boolean(changes[AUTO_SYNC_INTERVAL_MINUTES_KEY]);
 
-  if (changes.highlightEnabled || changes.highlightBlockedUrls || changes[HIGHLIGHT_PAGE_OVERRIDES_KEY]) {
+  if (highlightSettingsChanged) {
     refreshHighlightForAllTabs().catch(() => {
       // Ignore storage-driven highlight refresh failures.
     });
   }
 
-  updateHighlightContextMenuForActiveTab().catch(() => {
-    // Ignore storage-driven menu sync failures.
-  });
+  if (highlightSettingsChanged) {
+    updateHighlightContextMenuForActiveTab().catch(() => {
+      // Ignore storage-driven menu sync failures.
+    });
+  }
+
+  if (autoSyncSettingsChanged) {
+    updateAutoSyncAlarm().catch(() => {
+      // Ignore automatic sync alarm updates driven by storage changes.
+    });
+  }
 });
 
 if (chrome.contextMenus?.onClicked?.addListener) {
@@ -426,6 +575,16 @@ if (chrome.contextMenus?.onClicked?.addListener) {
 
     toggleHighlightForCurrentPage(info, tab).catch(() => {
       // Ignore toggle failures to avoid breaking unrelated background work.
+    });
+  });
+}
+
+if (chrome.alarms?.onAlarm?.addListener) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm?.name !== AUTO_SYNC_ALARM_NAME) return;
+
+    runAutomaticDatabaseSync().catch(() => {
+      // Ignore automatic sync failures; they can be retried on the next interval.
     });
   });
 }
@@ -446,9 +605,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "get-deck-items") {
-    chrome.storage.local.get(["deckItems"]).then((data) => {
-      sendResponse({ items: data.deckItems || [] });
-    });
+    ensureDatabaseInitialized()
+      .then(() => listAllDeckItems())
+      .then((items) => {
+        sendResponse({ items });
+      })
+      .catch(() => sendResponse({ items: [] }));
+    return true;
+  }
+
+  if (message?.type === "get-highlight-lexicon") {
+    loadHighlightLexicon(Number.isInteger(message.sinceRevision) ? message.sinceRevision : null)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || "Could not load highlight data." }));
     return true;
   }
 
@@ -483,9 +652,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sourceLang: message.sourceLang,
       targetLang: message.targetLang
     })
-      .then(async (item) => {
-        await refreshHighlightForTabIfEnabled(sender.tab?.id);
-        sendResponse({ ok: true, item });
+      .then(async ({ item, revision }) => {
+        await refreshHighlightForTabIfEnabled(sender.tab?.id, { deckRevision: revision });
+        sendResponse({ ok: true, item, revision });
       })
       .catch((error) => sendResponse({ ok: false, error: error?.message || "Could not save deck item." }));
     return true;
