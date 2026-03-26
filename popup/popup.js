@@ -9,10 +9,15 @@ import {
   replaceDeckItems,
   deleteDeckItems,
   chooseDatabaseSyncFile,
-  syncDatabaseToFile,
   getDatabaseLocationInfo,
   createDeckItem
 } from "../lib/database.js";
+import {
+  DATABASE_LAST_SYNC_AT_KEY,
+  getDatabaseSyncStatus,
+  runDatabaseSyncNow,
+  clearDatabaseLastSyncTime
+} from "../lib/database-sync.js";
 
 const state = {
   translated: "",
@@ -81,10 +86,6 @@ const THESAURUS_SINGULAR_LABELS = {
   synonyms: "Synonym",
   antonyms: "Antonym"
 };
-const AUTO_SYNC_ENABLED_KEY = "dbAutoSyncEnabled";
-const AUTO_SYNC_INTERVAL_MINUTES_KEY = "dbAutoSyncIntervalMinutes";
-const DEFAULT_AUTO_SYNC_INTERVAL_MINUTES = 60;
-const SUPPORTED_AUTO_SYNC_INTERVALS = new Set([5, 15, 30, 60, 180, 360, 720, 1440]);
 
 const el = {
   app: document.querySelector(".app"),
@@ -137,8 +138,7 @@ const el = {
   clearMerriamWebsterBtn: document.getElementById("clearMerriamWebsterBtn"),
   dbSummaryLabel: document.getElementById("dbSummaryLabel"),
   dbLocationLabel: document.getElementById("dbLocationLabel"),
-  autoSyncEnabled: document.getElementById("autoSyncEnabled"),
-  autoSyncInterval: document.getElementById("autoSyncInterval"),
+  dbLastSyncLabel: document.getElementById("dbLastSyncLabel"),
   importDbBtn: document.getElementById("importDbBtn"),
   chooseDbSyncBtn: document.getElementById("chooseDbSyncBtn"),
   syncDbBtn: document.getElementById("syncDbBtn"),
@@ -155,11 +155,6 @@ let popupContextAvailable = true;
 let popupResizeFrame = 0;
 let saveToastTimeoutId = 0;
 let settingsToastTimeoutId = 0;
-
-function normalizeAutoSyncIntervalMinutes(value) {
-  const numericValue = Number(value);
-  return SUPPORTED_AUTO_SYNC_INTERVALS.has(numericValue) ? numericValue : DEFAULT_AUTO_SYNC_INTERVAL_MINUTES;
-}
 
 function isExtensionContextInvalidatedError(error) {
   const message = error?.message || String(error || "");
@@ -251,6 +246,23 @@ function setStatus(message, isError = false) {
   if (!el.status) return;
   el.status.textContent = message;
   el.status.style.color = isError ? "#b42318" : "#245f5a";
+}
+
+function padDatePart(value) {
+  return String(value).padStart(2, "0");
+}
+
+function formatDatabaseLastSyncTime(value) {
+  if (!value) {
+    return "Not synced yet.";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Not synced yet.";
+  }
+
+  return `${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}:${padDatePart(date.getSeconds())} ${padDatePart(date.getDate())}/${padDatePart(date.getMonth() + 1)}/${date.getFullYear()}`;
 }
 
 function handlePopupAsyncError(error, fallbackMessage = "Operation failed.") {
@@ -1889,46 +1901,14 @@ async function syncDeckViewsAfterMutation(options = {}) {
 }
 
 async function refreshDatabaseLocationLabel() {
-  const info = await getDatabaseLocationInfo();
+  const [info, syncStatus] = await Promise.all([getDatabaseLocationInfo(), getDatabaseSyncStatus()]);
   el.dbSummaryLabel.textContent = info.notice ? `${info.summary} ${info.notice}` : info.summary;
   el.dbLocationLabel.textContent = info.detail;
-}
-
-function updateAutoSyncControls() {
-  if (el.autoSyncInterval) {
-    el.autoSyncInterval.disabled = !el.autoSyncEnabled?.checked;
+  if (el.dbLastSyncLabel) {
+    el.dbLastSyncLabel.textContent = info.hasSyncFile
+      ? formatDatabaseLastSyncTime(syncStatus?.lastSyncAt)
+      : "Choose a sync file first.";
   }
-}
-
-async function loadAutoSyncSettings() {
-  const data = await withPopupContext(
-    () => chrome.storage.local.get([AUTO_SYNC_ENABLED_KEY, AUTO_SYNC_INTERVAL_MINUTES_KEY]),
-    null
-  );
-
-  const enabled = data?.[AUTO_SYNC_ENABLED_KEY] === true;
-  const intervalMinutes = normalizeAutoSyncIntervalMinutes(data?.[AUTO_SYNC_INTERVAL_MINUTES_KEY]);
-
-  if (el.autoSyncEnabled) {
-    el.autoSyncEnabled.checked = enabled;
-  }
-  if (el.autoSyncInterval) {
-    el.autoSyncInterval.value = String(intervalMinutes);
-  }
-
-  updateAutoSyncControls();
-}
-
-async function saveAutoSyncSettings({ enabled, intervalMinutes }) {
-  const nextIntervalMinutes = normalizeAutoSyncIntervalMinutes(intervalMinutes);
-  await withPopupContext(
-    () =>
-      chrome.storage.local.set({
-        [AUTO_SYNC_ENABLED_KEY]: enabled,
-        [AUTO_SYNC_INTERVAL_MINUTES_KEY]: nextIntervalMinutes
-      }),
-    null
-  );
 }
 
 async function loadFlashcardSettings() {
@@ -2603,6 +2583,7 @@ function bindEvents() {
   bindAsyncEvent(el.chooseDbSyncBtn, "click", async () => {
     try {
       await chooseDatabaseSyncFile();
+      await clearDatabaseLastSyncTime();
       await refreshDatabaseLocationLabel();
       setStatus("Database sync file selected successfully.");
     } catch (error) {
@@ -2612,7 +2593,7 @@ function bindEvents() {
 
   bindAsyncEvent(el.syncDbBtn, "click", async () => {
     try {
-      const result = await syncDatabaseToFile();
+      const result = await runDatabaseSyncNow();
       await refreshDatabaseLocationLabel();
       setStatus(`Synced ${formatItemCountLabel(result.count)} to ${result.fileName}.`);
     } catch (error) {
@@ -2620,47 +2601,21 @@ function bindEvents() {
     }
   }, "Could not sync database file.");
 
-  bindAsyncEvent(el.autoSyncEnabled, "change", async () => {
-    const enabled = !!el.autoSyncEnabled.checked;
-    const intervalMinutes = normalizeAutoSyncIntervalMinutes(el.autoSyncInterval.value);
-
-    if (enabled) {
-      const info = await getDatabaseLocationInfo();
-      if (!info?.hasSyncFile) {
-        el.autoSyncEnabled.checked = false;
-        updateAutoSyncControls();
-        setStatus("Choose a sync file before enabling automatic sync.", true);
-        return;
-      }
-    }
-
-    await saveAutoSyncSettings({ enabled, intervalMinutes });
-    updateAutoSyncControls();
-    setStatus(
-      enabled
-        ? `Automatic database sync enabled every ${intervalMinutes} minute${intervalMinutes === 1 ? "" : "s"}.`
-        : "Automatic database sync disabled."
-    );
-  }, "Could not update automatic sync.");
-
-  bindAsyncEvent(el.autoSyncInterval, "change", async () => {
-    const intervalMinutes = normalizeAutoSyncIntervalMinutes(el.autoSyncInterval.value);
-    el.autoSyncInterval.value = String(intervalMinutes);
-    await saveAutoSyncSettings({
-      enabled: !!el.autoSyncEnabled.checked,
-      intervalMinutes
-    });
-    updateAutoSyncControls();
-    if (el.autoSyncEnabled.checked) {
-      setStatus(`Automatic database sync interval updated to ${intervalMinutes} minutes.`);
-    }
-  }, "Could not update automatic sync interval.");
-
   bindAsyncEvent(el.highlightEnabled, "change", async () => {
     await saveHighlightSetting(el.highlightEnabled.checked);
     if (!popupContextAvailable) return;
     setStatus(`Highlight ${el.highlightEnabled.checked ? "enabled" : "disabled"}.`);
   }, "Could not update highlight setting.");
+
+  if (chrome.storage?.onChanged?.addListener) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local" || !changes[DATABASE_LAST_SYNC_AT_KEY]) return;
+
+      Promise.resolve(refreshDatabaseLocationLabel()).catch((error) => {
+        handlePopupAsyncError(error, "Could not refresh database sync status.");
+      });
+    });
+  }
 
   bindAsyncEvent(el.addHighlightBlockUrlBtn, "click", addHighlightBlockedUrlRule, "Could not add highlight block rule.");
   el.highlightBlockUrlInput.addEventListener("keydown", (event) => {
@@ -2699,7 +2654,6 @@ async function init() {
   await Promise.all([
     refreshDeck(),
     refreshDatabaseLocationLabel(),
-    loadAutoSyncSettings(),
     loadFlashcardSettings(),
     loadHighlightSetting(),
     loadGoogleApiKey(),

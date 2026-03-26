@@ -4,8 +4,7 @@ import {
   upsertDeckItem,
   createDeckItem,
   getHighlightLexicon,
-  getDeckRevision,
-  syncDatabaseToFile
+  getDeckRevision
 } from "../lib/database.js";
 
 const LAST_SELECTION_KEY = "lastTabSelection";
@@ -14,11 +13,6 @@ const HIGHLIGHT_CONTEXT_MENU_ID = "toggle-highlight-current-page";
 const HIGHLIGHT_PAGE_OVERRIDES_KEY = "highlightPageOverrides";
 const HIGHLIGHT_STORAGE_KEYS = ["highlightEnabled", "highlightBlockedUrls", HIGHLIGHT_PAGE_OVERRIDES_KEY];
 const SUPPORTED_HIGHLIGHT_PAGE_PROTOCOLS = new Set(["http:", "https:", "file:"]);
-const AUTO_SYNC_ENABLED_KEY = "dbAutoSyncEnabled";
-const AUTO_SYNC_INTERVAL_MINUTES_KEY = "dbAutoSyncIntervalMinutes";
-const AUTO_SYNC_ALARM_NAME = "database-auto-sync";
-const DEFAULT_AUTO_SYNC_INTERVAL_MINUTES = 60;
-const SUPPORTED_AUTO_SYNC_INTERVALS = new Set([5, 15, 30, 60, 180, 360, 720, 1440]);
 
 let databaseReady = null;
 let highlightContextMenuReady = null;
@@ -44,11 +38,6 @@ async function setLastSelection(tabId, text) {
 
 function normalizeText(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
-}
-
-function normalizeAutoSyncIntervalMinutes(value) {
-  const numericValue = Number(value);
-  return SUPPORTED_AUTO_SYNC_INTERVALS.has(numericValue) ? numericValue : DEFAULT_AUTO_SYNC_INTERVAL_MINUTES;
 }
 
 function normalizeHighlightBlockedUrlRule(value) {
@@ -149,42 +138,6 @@ async function getHighlightSettings() {
     highlightBlockedUrls: normalizeHighlightBlockedUrls(data.highlightBlockedUrls),
     highlightPageOverrides: normalizeHighlightPageOverrides(data[HIGHLIGHT_PAGE_OVERRIDES_KEY])
   };
-}
-
-async function getAutoSyncSettings() {
-  const data = await chrome.storage.local.get([AUTO_SYNC_ENABLED_KEY, AUTO_SYNC_INTERVAL_MINUTES_KEY]);
-  return {
-    enabled: data[AUTO_SYNC_ENABLED_KEY] === true,
-    intervalMinutes: normalizeAutoSyncIntervalMinutes(data[AUTO_SYNC_INTERVAL_MINUTES_KEY])
-  };
-}
-
-async function updateAutoSyncAlarm() {
-  if (!chrome.alarms?.clear || !chrome.alarms?.create) return;
-
-  const settings = await getAutoSyncSettings();
-  await chrome.alarms.clear(AUTO_SYNC_ALARM_NAME);
-  if (!settings.enabled) {
-    return;
-  }
-
-  chrome.alarms.create(AUTO_SYNC_ALARM_NAME, {
-    delayInMinutes: settings.intervalMinutes,
-    periodInMinutes: settings.intervalMinutes
-  });
-}
-
-async function runAutomaticDatabaseSync() {
-  const settings = await getAutoSyncSettings();
-  if (!settings.enabled) return;
-
-  await ensureDatabaseInitialized();
-
-  try {
-    await syncDatabaseToFile({ requestPermission: false });
-  } catch {
-    // Ignore automatic sync failures; manual sync in the popup can recover permission or file issues.
-  }
 }
 
 function resolvePageHighlightState(pageUrl, settings) {
@@ -492,7 +445,6 @@ async function loadHighlightLexicon(sinceRevision = null) {
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureHighlightContextMenu();
   await ensureDatabaseInitialized();
-  await updateAutoSyncAlarm();
   const existing = await chrome.storage.local.get(["highlightEnabled"]);
   if (typeof existing.highlightEnabled !== "boolean") {
     await chrome.storage.local.set({ highlightEnabled: true });
@@ -503,9 +455,6 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(() => {
   ensureHighlightContextMenu().catch(() => {
     // Ignore context menu recreation failures on startup.
-  });
-  updateAutoSyncAlarm().catch(() => {
-    // Ignore automatic sync alarm setup failures on startup.
   });
   updateHighlightContextMenuForActiveTab().catch(() => {
     // Ignore menu sync failures on startup.
@@ -547,7 +496,6 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     Boolean(changes.highlightEnabled) ||
     Boolean(changes.highlightBlockedUrls) ||
     Boolean(changes[HIGHLIGHT_PAGE_OVERRIDES_KEY]);
-  const autoSyncSettingsChanged = Boolean(changes[AUTO_SYNC_ENABLED_KEY]) || Boolean(changes[AUTO_SYNC_INTERVAL_MINUTES_KEY]);
 
   if (highlightSettingsChanged) {
     refreshHighlightForAllTabs().catch(() => {
@@ -555,12 +503,6 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     });
     updateHighlightContextMenuForActiveTab().catch(() => {
       // Ignore storage-driven menu sync failures.
-    });
-  }
-
-  if (autoSyncSettingsChanged) {
-    updateAutoSyncAlarm().catch(() => {
-      // Ignore automatic sync alarm updates driven by storage changes.
     });
   }
 });
@@ -571,16 +513,6 @@ if (chrome.contextMenus?.onClicked?.addListener) {
 
     toggleHighlightForCurrentPage(info, tab).catch(() => {
       // Ignore toggle failures to avoid breaking unrelated background work.
-    });
-  });
-}
-
-if (chrome.alarms?.onAlarm?.addListener) {
-  chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm?.name !== AUTO_SYNC_ALARM_NAME) return;
-
-    runAutomaticDatabaseSync().catch(() => {
-      // Ignore automatic sync failures; they can be retried on the next interval.
     });
   });
 }
