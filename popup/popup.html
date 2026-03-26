@@ -266,6 +266,41 @@
         <div id="settingsToast" class="settings-toast" role="status" aria-live="polite" hidden></div>
       </section>
 
+      <div id="duplicateWarningModal" class="popup-modal-backdrop" hidden>
+        <div
+          class="popup-modal"
+          role="alert"
+          aria-live="assertive"
+          aria-labelledby="duplicateWarningTitle"
+          aria-describedby="duplicateWarningSource duplicateWarningMeaning"
+        >
+          <div class="popup-modal-head">
+            <div class="popup-modal-head-copy">
+              <h3 id="duplicateWarningTitle" class="popup-modal-title">Duplicated!!!</h3>
+            </div>
+            <button
+              id="duplicateWarningCloseBtn"
+              class="popup-modal-close-btn"
+              type="button"
+              aria-label="Close duplicate warning"
+              title="Close"
+            >
+              <span aria-hidden="true">×</span>
+            </button>
+          </div>
+          <div class="popup-modal-detail-grid">
+            <div class="popup-modal-detail-card">
+              <span class="popup-modal-detail-label">Existing original</span>
+              <p id="duplicateWarningSource" class="popup-modal-detail-value"></p>
+            </div>
+            <div class="popup-modal-detail-card">
+              <span class="popup-modal-detail-label">Existing translated meaning</span>
+              <p id="duplicateWarningMeaning" class="popup-modal-detail-value"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div id="saveToast" class="save-toast" role="status" aria-live="polite" hidden></div>
     </div>
 

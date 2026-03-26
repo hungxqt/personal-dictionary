@@ -4,6 +4,7 @@ import {
   initializeDatabase,
   queryDeckItems,
   getDeckItem,
+  findDeckItemBySourceText,
   listAllDeckItems,
   upsertDeckItem,
   replaceDeckItems,
@@ -148,6 +149,11 @@ const el = {
   highlightBlockUrlList: document.getElementById("highlightBlockUrlList"),
   settingsToast: document.getElementById("settingsToast"),
   saveToast: document.getElementById("saveToast"),
+  duplicateWarningModal: document.getElementById("duplicateWarningModal"),
+  duplicateWarningTitle: document.getElementById("duplicateWarningTitle"),
+  duplicateWarningSource: document.getElementById("duplicateWarningSource"),
+  duplicateWarningMeaning: document.getElementById("duplicateWarningMeaning"),
+  duplicateWarningCloseBtn: document.getElementById("duplicateWarningCloseBtn"),
   status: document.getElementById("status")
 };
 
@@ -155,6 +161,8 @@ let popupContextAvailable = true;
 let popupResizeFrame = 0;
 let saveToastTimeoutId = 0;
 let settingsToastTimeoutId = 0;
+let duplicateWarningTimeoutId = 0;
+let duplicateWarningHideTimeoutId = 0;
 
 function isExtensionContextInvalidatedError(error) {
   const message = error?.message || String(error || "");
@@ -297,6 +305,48 @@ function showSaveToast(message) {
       }
     }, 180);
   }, 1800);
+}
+
+function isDuplicateWarningModalOpen() {
+  return Boolean(el.duplicateWarningModal && !el.duplicateWarningModal.hidden);
+}
+
+function hideDuplicateWarningModal() {
+  if (!el.duplicateWarningModal) return;
+
+  window.clearTimeout(duplicateWarningTimeoutId);
+  duplicateWarningTimeoutId = 0;
+  window.clearTimeout(duplicateWarningHideTimeoutId);
+  el.duplicateWarningModal.classList.remove("visible");
+  duplicateWarningHideTimeoutId = window.setTimeout(() => {
+    if (!el.duplicateWarningModal.classList.contains("visible")) {
+      el.duplicateWarningModal.hidden = true;
+    }
+    duplicateWarningHideTimeoutId = 0;
+  }, 180);
+}
+
+function openDuplicateWarningModal() {
+  if (!el.duplicateWarningModal) return;
+
+  window.clearTimeout(duplicateWarningTimeoutId);
+  window.clearTimeout(duplicateWarningHideTimeoutId);
+  el.duplicateWarningModal.hidden = false;
+  window.requestAnimationFrame(() => {
+    el.duplicateWarningModal.classList.add("visible");
+  });
+  duplicateWarningTimeoutId = window.setTimeout(() => {
+    hideDuplicateWarningModal();
+  }, 5000);
+}
+
+function handleDuplicateWarningModalKeyDown(event) {
+  if (!isDuplicateWarningModalOpen()) return;
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    hideDuplicateWarningModal();
+  }
 }
 
 function bindAsyncEvent(target, eventName, handler, fallbackMessage = "Operation failed.") {
@@ -658,6 +708,57 @@ function resetTranslateOutputs({
 
 function normalizeDeckTextValue(value) {
   return String(value ?? "").trim().replace(/\s+/g, " ");
+}
+
+function showDuplicateDeckItemAlert(existingItem, options = {}) {
+  const isUpdate = Boolean(options.isUpdate);
+  const existingSourceText = normalizeDeckTextValue(existingItem?.sourceText) || "(unavailable)";
+  const existingTranslatedText = normalizeDeckTextValue(existingItem?.translatedText) || "(unavailable)";
+
+  if (!el.duplicateWarningModal) {
+    window.alert(
+      [
+        isUpdate
+          ? "This source text already exists in the deck. The update was canceled."
+          : "This source text already exists in the deck. No card was added.",
+        "",
+        `Existing original: ${existingSourceText}`,
+        `Existing translated meaning: ${existingTranslatedText}`
+      ].join("\n")
+    );
+    return;
+  }
+
+  el.duplicateWarningTitle.textContent = isUpdate
+    ? "This source text is already in your deck"
+    : "Duplicated!!!";
+  el.duplicateWarningSource.textContent = existingSourceText;
+  el.duplicateWarningMeaning.textContent = existingTranslatedText;
+  openDuplicateWarningModal();
+}
+
+function handleDuplicateDeckItemConflict(existingItem, { isUpdate = false } = {}) {
+  if (!existingItem) return false;
+
+  showDuplicateDeckItemAlert(existingItem, { isUpdate });
+  setStatus(
+    isUpdate ? "A different deck card already uses that source text." : "That source text already exists in the deck.",
+    true
+  );
+  return true;
+}
+
+function handleDuplicateDeckItemSaveError(error, { isUpdate = false } = {}) {
+  if (error?.name !== "DuplicateDeckSourceError") {
+    return false;
+  }
+
+  showDuplicateDeckItemAlert(error?.existingItem || null, { isUpdate });
+  setStatus(
+    isUpdate ? "A different deck card already uses that source text." : "That source text already exists in the deck.",
+    true
+  );
+  return true;
 }
 
 function normalizeHighlightBlockedUrlRule(value) {
@@ -2207,10 +2308,11 @@ async function translateCurrentText() {
 async function saveCurrentTranslation() {
   const sourceText = el.sourceText.value.trim();
   const translatedText = getCurrentTranslatedText();
+  const editingDeckItem = isEditingDeckItem();
 
   if (!sourceText || !translatedText) {
     setStatus(
-      isEditingDeckItem()
+      editingDeckItem
         ? "Enter both source and translated text before updating."
         : isEditingTranslationDraft()
           ? "Enter both source and translated text before saving."
@@ -2220,7 +2322,7 @@ async function saveCurrentTranslation() {
     return;
   }
 
-  if (isEditingDeckItem()) {
+  if (editingDeckItem) {
     const existingItem = await getDeckItem(state.editingDeckItemId);
     if (!existingItem) {
       exitDeckEditMode();
@@ -2228,6 +2330,18 @@ async function saveCurrentTranslation() {
       updateClearSourceTextButtonState();
       setStatus("The selected deck item no longer exists.", true);
       return;
+    }
+
+    const sourceTextChanged =
+      normalizeDeckTextValue(existingItem.sourceText).toLowerCase() !== normalizeDeckTextValue(sourceText).toLowerCase();
+
+    if (sourceTextChanged) {
+      const conflictingItem = await findDeckItemBySourceText(sourceText, {
+        excludeId: state.editingDeckItemId
+      });
+      if (handleDuplicateDeckItemConflict(conflictingItem, { isUpdate: true })) {
+        return;
+      }
     }
 
     const updatedItem = {
@@ -2238,7 +2352,19 @@ async function saveCurrentTranslation() {
       targetLang: state.targetLang
     };
 
-    const { item: savedItem, revision } = await upsertDeckItem(updatedItem);
+    let savedItem;
+    let revision;
+
+    try {
+      ({ item: savedItem, revision } = await upsertDeckItem(updatedItem));
+    } catch (error) {
+      if (handleDuplicateDeckItemSaveError(error, { isUpdate: true })) {
+        return;
+      }
+
+      throw error;
+    }
+
     state.selectedDeckIds = new Set([savedItem.id]);
     await syncDeckViewsAfterMutation({ deckRevision: revision });
     if (!popupContextAvailable) return;
@@ -2253,6 +2379,11 @@ async function saveCurrentTranslation() {
     return;
   }
 
+  const conflictingItem = await findDeckItemBySourceText(sourceText);
+  if (handleDuplicateDeckItemConflict(conflictingItem)) {
+    return;
+  }
+
   const item = createDeckItem({
     sourceText,
     translatedText,
@@ -2260,7 +2391,18 @@ async function saveCurrentTranslation() {
     targetLang: state.targetLang
   });
 
-  const { revision } = await upsertDeckItem(item);
+  let revision;
+
+  try {
+    ({ revision } = await upsertDeckItem(item));
+  } catch (error) {
+    if (handleDuplicateDeckItemSaveError(error)) {
+      return;
+    }
+
+    throw error;
+  }
+
   await syncDeckViewsAfterMutation({
     deckRevision: revision,
     resetDeckPage: true
@@ -2451,6 +2593,7 @@ async function goToDeckPage(nextPage) {
 }
 
 function handleFlashcardKeyDown(event) {
+  if (isDuplicateWarningModalOpen()) return;
   if (getActivePopupTabName() !== "flashcards") return;
   if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
 
@@ -2636,6 +2779,8 @@ function bindEvents() {
       handlePopupAsyncError(error, "Could not remove highlight block rule.");
     });
   });
+  el.duplicateWarningCloseBtn?.addEventListener("click", () => hideDuplicateWarningModal());
+  document.addEventListener("keydown", handleDuplicateWarningModalKeyDown);
   document.addEventListener("keydown", handleFlashcardKeyDown);
 }
 
