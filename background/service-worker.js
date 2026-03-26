@@ -1,7 +1,6 @@
 import { translateTextDetailed } from "../lib/translator.js";
 import {
   initializeDatabase,
-  listAllDeckItems,
   upsertDeckItem,
   createDeckItem,
   getHighlightLexicon,
@@ -554,9 +553,6 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     refreshHighlightForAllTabs().catch(() => {
       // Ignore storage-driven highlight refresh failures.
     });
-  }
-
-  if (highlightSettingsChanged) {
     updateHighlightContextMenuForActiveTab().catch(() => {
       // Ignore storage-driven menu sync failures.
     });
@@ -601,16 +597,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.storage.local.set({ highlightEnabled: !!message.enabled }).then(() => {
       sendResponse({ ok: true });
     });
-    return true;
-  }
-
-  if (message?.type === "get-deck-items") {
-    ensureDatabaseInitialized()
-      .then(() => listAllDeckItems())
-      .then((items) => {
-        sendResponse({ items });
-      })
-      .catch(() => sendResponse({ items: [] }));
     return true;
   }
 

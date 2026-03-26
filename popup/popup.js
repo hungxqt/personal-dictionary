@@ -6,7 +6,6 @@ import {
   getDeckItem,
   listAllDeckItems,
   upsertDeckItem,
-  bulkUpsertDeckItems,
   replaceDeckItems,
   deleteDeckItems,
   chooseDatabaseSyncFile,
@@ -36,7 +35,6 @@ const state = {
   selectedDeckIds: new Set(),
   editingDeckItemId: "",
   editingTranslationDraft: false,
-  deckClipboard: [],
   deckSort: "newest",
   deckPage: 1,
   deckPageSize: 10,
@@ -121,7 +119,6 @@ const el = {
   deckAddManualBtn: document.getElementById("deckAddManualBtn"),
   deckDeleteToolbarBtn: document.getElementById("deckDeleteToolbarBtn"),
   deckModifyToolbarBtn: document.getElementById("deckModifyToolbarBtn"),
-  deckPasteToolbarBtn: document.getElementById("deckPasteToolbarBtn"),
   deckSort: document.getElementById("deckSort"),
   importDeckBtn: document.getElementById("importDeckBtn"),
   exportDeckBtn: document.getElementById("exportDeckBtn"),
@@ -1560,36 +1557,6 @@ function sortDeckItemsByNewest(items) {
   });
 }
 
-function sortDeckItems(items, sortOrder = state.deckSort) {
-  const sortedItems = [...items];
-
-  sortedItems.sort((left, right) => {
-    if (sortOrder === "oldest") {
-      const timestampDiff = getDeckItemTimestamp(left) - getDeckItemTimestamp(right);
-      if (timestampDiff !== 0) return timestampDiff;
-      return String(left?.id || "").localeCompare(String(right?.id || ""));
-    }
-
-    if (sortOrder === "source-asc") {
-      const sourceDiff = String(left?.sourceText || "").localeCompare(String(right?.sourceText || ""));
-      if (sourceDiff !== 0) return sourceDiff;
-      return getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
-    }
-
-    if (sortOrder === "source-desc") {
-      const sourceDiff = String(right?.sourceText || "").localeCompare(String(left?.sourceText || ""));
-      if (sourceDiff !== 0) return sourceDiff;
-      return getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
-    }
-
-    const timestampDiff = getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
-    if (timestampDiff !== 0) return timestampDiff;
-    return String(right?.id || "").localeCompare(String(left?.id || ""));
-  });
-
-  return sortedItems;
-}
-
 function normalizeFlashcardOrderMode(value) {
   return FLASHCARD_ORDER_MODES.has(value) ? value : "time-desc";
 }
@@ -2339,12 +2306,10 @@ function pruneDeckSelection() {
 function updateDeckToolbarState() {
   const selectedCount = state.selectedDeckIds.size;
   const hasSelection = selectedCount > 0;
-  const hasClipboard = state.deckClipboard.length > 0;
   const hasDeckItems = state.deckTotalCount > 0;
 
   el.deckDeleteToolbarBtn.disabled = !hasSelection;
   el.deckModifyToolbarBtn.disabled = selectedCount !== 1;
-  el.deckPasteToolbarBtn.disabled = !hasClipboard;
   el.exportDeckBtn.disabled = !hasDeckItems;
 }
 
@@ -2426,19 +2391,6 @@ async function deleteSelectedDeckItems() {
   }
   await syncDeckViewsAfterMutation({ deckRevision: revision });
   setStatus(`${formatItemCountLabel(selectedCount)} deleted.`);
-}
-
-async function pasteDeckItems() {
-  if (!state.deckClipboard.length) return;
-
-  const clipboardItems = state.deckClipboard.map((item) => ({ ...item }));
-  const { revision } = await bulkUpsertDeckItems(clipboardItems);
-  state.deckClipboard = [];
-  await syncDeckViewsAfterMutation({
-    deckRevision: revision,
-    resetDeckPage: true
-  });
-  setStatus(`${formatItemCountLabel(clipboardItems.length)} pasted.`);
 }
 
 async function loadHighlightSetting() {
@@ -2591,7 +2543,6 @@ function bindEvents() {
   el.deckAddManualBtn.addEventListener("click", () => handleDeckToolbarAction("add-manual"));
   bindAsyncEvent(el.deckDeleteToolbarBtn, "click", deleteSelectedDeckItems, "Could not delete deck items.");
   bindAsyncEvent(el.deckModifyToolbarBtn, "click", editSelectedDeckItem, "Could not load deck item for editing.");
-  bindAsyncEvent(el.deckPasteToolbarBtn, "click", pasteDeckItems, "Could not paste deck items.");
   el.deckSearch.addEventListener("input", () => {
     state.deckPage = 1;
     updateClearDeckSearchButtonState();
