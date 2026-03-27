@@ -370,13 +370,36 @@ function schedulePopupResize() {
     document.body.style.height = "auto";
     document.body.style.maxHeight = "none";
 
-    const popupHeight = Math.min(el.app.scrollHeight + 12, 600);
+    const popupContentHeight = el.app.scrollHeight + 12;
+    const popupHeight = Math.min(popupContentHeight, 600);
+    const popupNeedsVerticalScroll = popupContentHeight > 600;
 
     document.documentElement.style.height = `${popupHeight}px`;
     document.documentElement.style.maxHeight = `${popupHeight}px`;
+    document.documentElement.style.overflowY = popupNeedsVerticalScroll ? "auto" : "hidden";
     document.body.style.height = `${popupHeight}px`;
     document.body.style.maxHeight = `${popupHeight}px`;
+    document.body.style.overflowY = popupNeedsVerticalScroll ? "auto" : "hidden";
   });
+}
+
+function resizeTextareaToFitContent(textarea) {
+  if (!(textarea instanceof HTMLTextAreaElement)) return;
+
+  const computedStyle = window.getComputedStyle(textarea);
+  const minHeight = Number.parseFloat(computedStyle.minHeight) || 0;
+  const borderHeight =
+    (Number.parseFloat(computedStyle.borderTopWidth) || 0) +
+    (Number.parseFloat(computedStyle.borderBottomWidth) || 0);
+
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.max(Math.ceil(textarea.scrollHeight + borderHeight + 1), minHeight)}px`;
+}
+
+function syncTranslateTextareaHeights() {
+  resizeTextareaToFitContent(el.sourceText);
+  resizeTextareaToFitContent(el.translatedText);
+  schedulePopupResize();
 }
 
 function getThesaurusButton(type) {
@@ -673,7 +696,7 @@ function enterTranslationDraftEditMode() {
   updateSaveButtonLabel();
   updateTranslateSaveButtonState();
   resetSynonymOutput("Synonyms and antonyms update after the next translation.");
-  schedulePopupResize();
+  syncTranslateTextareaHeights();
   el.translatedText.focus();
   const caretPosition = el.translatedText.value.length;
   el.translatedText.setSelectionRange(caretPosition, caretPosition);
@@ -704,6 +727,7 @@ function resetTranslateOutputs({
   resetTranslationOutput(translatedPlaceholder);
   resetSynonymOutput(synonymMessage);
   setThesaurusButtonState({ disabled: true });
+  syncTranslateTextareaHeights();
 }
 
 function normalizeDeckTextValue(value) {
@@ -1331,8 +1355,11 @@ function switchTab(tabName, options = {}) {
     focusDeckSearchInput();
   }
 
-  if (tabName === "translate" && focusTranslateInput) {
-    focusSourceText(true);
+  if (tabName === "translate") {
+    syncTranslateTextareaHeights();
+    if (focusTranslateInput) {
+      focusSourceText(true);
+    }
   }
 }
 
@@ -1407,7 +1434,7 @@ function handleTranslatedTextChanged() {
 
   state.translated = el.translatedText.value.trim();
   updateTranslateSaveButtonState();
-  schedulePopupResize();
+  syncTranslateTextareaHeights();
 }
 
 function enterDeckEditMode(item) {
@@ -1431,7 +1458,6 @@ function enterDeckEditMode(item) {
   resetSynonymOutput(READY_THESAURUS_MESSAGE);
   setThesaurusButtonState({ disabled: !state.translated.trim() });
   switchTab("translate");
-  schedulePopupResize();
   focusSourceText(true);
 }
 
@@ -1466,6 +1492,7 @@ function swapSelectedLanguages() {
   }
 
   updateClearSourceTextButtonState();
+  syncTranslateTextareaHeights();
   setStatus("Languages switched.");
 }
 
@@ -1596,6 +1623,7 @@ function handleTranslateInputsChanged() {
     resetSynonymOutput("Synonyms and antonyms update after the next translation.");
     updateClearSourceTextButtonState();
     updateTranslateSaveButtonState();
+    syncTranslateTextareaHeights();
     return;
   }
 
@@ -2291,7 +2319,7 @@ async function translateCurrentText() {
     updateTranslateSaveButtonState();
     resetSynonymOutput(READY_THESAURUS_MESSAGE);
     setThesaurusButtonState({ disabled: !translated });
-    schedulePopupResize();
+    syncTranslateTextareaHeights();
     setStatus("Translation completed.");
   } catch (error) {
     if (isTranslationEditable()) {

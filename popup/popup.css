@@ -403,6 +403,12 @@ textarea {
   line-height: 1.45;
 }
 
+#sourceText,
+#translatedText {
+  resize: none;
+  overflow-y: hidden;
+}
+
 #translatedText.editable-translation {
   border-color: rgba(99, 141, 184, 0.92);
   background: linear-gradient(180deg, rgba(23, 33, 45, 0.98) 0%, rgba(18, 26, 36, 0.98) 100%);
