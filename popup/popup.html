@@ -173,6 +173,7 @@
             <label for="flashcardOrderMode">Card order</label>
             <select id="flashcardOrderMode">
               <option value="random">Random</option>
+              <option value="favorite">Favorite</option>
               <option value="alpha-asc">Alphabet A-Z</option>
               <option value="alpha-desc">Alphabet Z-A</option>
               <option value="time-desc">Time newest first</option>
@@ -196,7 +197,12 @@
         <button id="flashcardCard" class="flashcard-card" type="button" data-face="empty" disabled>
           <div class="flashcard-card-head">
             <span id="flashcardFaceLabel" class="flashcard-face-label">Flashcards</span>
-            <span id="flashcardLanguageLabel" class="flashcard-language-label">Deck</span>
+            <div class="flashcard-card-meta">
+              <span id="flashcardStarBadge" class="flashcard-star-badge" hidden>
+                ☆
+              </span>
+              <span id="flashcardLanguageLabel" class="flashcard-language-label">Deck</span>
+            </div>
           </div>
           <div id="flashcardCardText" class="flashcard-card-text">Add cards to your deck to start reviewing.</div>
           <div id="flashcardHint" class="flashcard-hint"></div>

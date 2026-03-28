@@ -43,7 +43,7 @@ const state = {
   editingTranslationDraft: false,
   deckSort: "newest",
   deckPage: 1,
-  deckPageSize: 10,
+  deckPageSize: 5,
   deckLoadRequestId: 0,
   flashcardOrderMode: "time-desc",
   flashcardDeck: [],
@@ -78,7 +78,7 @@ const DEFAULT_TRANSLATED_PLACEHOLDER = "Translation appears here...";
 const DEFAULT_THESAURUS_MESSAGE = "Translate text first, then click Synonyms or Antonyms.";
 const READY_THESAURUS_MESSAGE = "Click Synonyms or Antonyms to load suggestions.";
 const THESAURUS_TYPES = ["synonyms", "antonyms"];
-const FLASHCARD_ORDER_MODES = new Set(["random", "alpha-asc", "alpha-desc", "time-desc", "time-asc"]);
+const FLASHCARD_ORDER_MODES = new Set(["random", "favorite", "alpha-asc", "alpha-desc", "time-desc", "time-asc"]);
 const THESAURUS_LABELS = {
   synonyms: "Synonyms",
   antonyms: "Antonyms"
@@ -114,6 +114,7 @@ const el = {
   flashcardNextBtn: document.getElementById("flashcardNextBtn"),
   flashcardCard: document.getElementById("flashcardCard"),
   flashcardFaceLabel: document.getElementById("flashcardFaceLabel"),
+  flashcardStarBadge: document.getElementById("flashcardStarBadge"),
   flashcardLanguageLabel: document.getElementById("flashcardLanguageLabel"),
   flashcardCardText: document.getElementById("flashcardCardText"),
   flashcardHint: document.getElementById("flashcardHint"),
@@ -819,6 +820,22 @@ function normalizeImportedCreatedAt(value) {
   return date.toISOString();
 }
 
+function normalizeImportedStarredValue(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value > 0;
+  }
+
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+
+  return ["true", "1", "yes", "y", "star", "starred", "favorite", "favourite"].includes(normalized);
+}
+
 function createImportedDeckItem(rawItem) {
   if (!rawItem || typeof rawItem !== "object") return null;
 
@@ -842,13 +859,17 @@ function createImportedDeckItem(rawItem) {
   const createdAt = normalizeImportedCreatedAt(
     rawItem.createdAt ?? rawItem.savedAt ?? rawItem.timestamp ?? rawItem.date
   );
+  const starred = normalizeImportedStarredValue(
+    rawItem.starred ?? rawItem.isStarred ?? rawItem.favorite ?? rawItem.favourite ?? rawItem.star
+  );
   const importedId = typeof rawItem.id === "string" ? rawItem.id.trim() : "";
 
   const item = createDeckItem({
     sourceText,
     translatedText,
     sourceLang,
-    targetLang
+    targetLang,
+    starred
   });
 
   if (createdAt) {
@@ -985,7 +1006,12 @@ function mapCsvHeaders(headers) {
     createdat: "createdAt",
     savedat: "createdAt",
     timestamp: "createdAt",
-    date: "createdAt"
+    date: "createdAt",
+    starred: "starred",
+    isstarred: "starred",
+    star: "starred",
+    favorite: "starred",
+    favourite: "starred"
   };
 
   return headers.map((header) => aliases[normalizeImportHeader(header)] || "");
@@ -1016,7 +1042,8 @@ function parseCsvDeck(text) {
         sourceLang: row[2],
         targetLang: row[3],
         createdAt: row[4],
-        id: row[5]
+        id: row[5],
+        starred: row[6]
       });
     })
     .filter(Boolean);
@@ -1076,7 +1103,8 @@ function parsePlainTextDeck(text) {
         sourceLang: unescapePlainTextField(parts[2] ?? ""),
         targetLang: unescapePlainTextField(parts[3] ?? ""),
         createdAt: unescapePlainTextField(parts[4] ?? ""),
-        id: unescapePlainTextField(parts[5] ?? "")
+        id: unescapePlainTextField(parts[5] ?? ""),
+        starred: unescapePlainTextField(parts[6] ?? "")
       })
     )
     .filter(Boolean);
@@ -1173,7 +1201,7 @@ function serializeDeckAsJson(items) {
 }
 
 function serializeDeckAsCsv(items) {
-  const headers = ["sourceText", "translatedText", "sourceLang", "targetLang", "createdAt", "id"];
+  const headers = ["sourceText", "translatedText", "sourceLang", "targetLang", "createdAt", "id", "starred"];
   const rows = items.map((item) =>
     headers.map((header) => escapeCsvCell(item?.[header] ?? "")).join(",")
   );
@@ -1189,11 +1217,12 @@ function serializeDeckAsPlainText(items) {
       escapePlainTextField(item.sourceLang),
       escapePlainTextField(item.targetLang),
       escapePlainTextField(item.createdAt),
-      escapePlainTextField(item.id)
+      escapePlainTextField(item.id),
+      escapePlainTextField(item.starred ? "true" : "")
     ].join("\t")
   );
 
-  return ["sourceText\ttranslatedText\tsourceLang\ttargetLang\tcreatedAt\tid", ...lines].join("\r\n");
+  return ["sourceText\ttranslatedText\tsourceLang\ttargetLang\tcreatedAt\tid\tstarred", ...lines].join("\r\n");
 }
 
 function buildDeckExportContent(items, format) {
@@ -1685,20 +1714,34 @@ function formatItemCountLabel(count) {
   return `${count} item${count === 1 ? "" : "s"}`;
 }
 
+function isDeckItemStarred(item) {
+  return Boolean(item?.starred);
+}
+
+function replaceItemById(items, nextItem) {
+  return items.map((item) => (item?.id === nextItem?.id ? nextItem : item));
+}
+
 function getDeckItemTimestamp(item) {
   const timestamp = Date.parse(item?.createdAt || "");
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
+function compareDeckItemsByNewest(left, right) {
+  const timestampDiff = getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
+  if (timestampDiff !== 0) return timestampDiff;
+  return String(right?.id || "").localeCompare(String(left?.id || ""));
+}
+
 function sortDeckItemsByNewest(items) {
-  return [...items].sort((left, right) => {
-    const timestampDiff = getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
-    if (timestampDiff !== 0) return timestampDiff;
-    return String(right?.id || "").localeCompare(String(left?.id || ""));
-  });
+  return [...items].sort(compareDeckItemsByNewest);
 }
 
 function normalizeFlashcardOrderMode(value) {
+  if (value === "starred-first") {
+    return "favorite";
+  }
+
   return FLASHCARD_ORDER_MODES.has(value) ? value : "time-desc";
 }
 
@@ -1718,18 +1761,24 @@ function sortFlashcardItems(items, orderMode = state.flashcardOrderMode) {
     return shuffleDeckItems(items);
   }
 
-  const sortedItems = [...items];
+  const sortedItems =
+    orderMode === "favorite" ? items.filter((item) => isDeckItemStarred(item)) : [...items];
+
   sortedItems.sort((left, right) => {
+    if (orderMode === "favorite") {
+      return compareDeckItemsByNewest(left, right);
+    }
+
     if (orderMode === "alpha-asc") {
       const sourceDiff = String(left?.sourceText || "").localeCompare(String(right?.sourceText || ""));
       if (sourceDiff !== 0) return sourceDiff;
-      return getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
+      return compareDeckItemsByNewest(left, right);
     }
 
     if (orderMode === "alpha-desc") {
       const sourceDiff = String(right?.sourceText || "").localeCompare(String(left?.sourceText || ""));
       if (sourceDiff !== 0) return sourceDiff;
-      return getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
+      return compareDeckItemsByNewest(left, right);
     }
 
     if (orderMode === "time-asc") {
@@ -1738,9 +1787,7 @@ function sortFlashcardItems(items, orderMode = state.flashcardOrderMode) {
       return String(left?.id || "").localeCompare(String(right?.id || ""));
     }
 
-    const timestampDiff = getDeckItemTimestamp(right) - getDeckItemTimestamp(left);
-    if (timestampDiff !== 0) return timestampDiff;
-    return String(right?.id || "").localeCompare(String(left?.id || ""));
+    return compareDeckItemsByNewest(left, right);
   });
 
   return sortedItems;
@@ -1749,6 +1796,19 @@ function sortFlashcardItems(items, orderMode = state.flashcardOrderMode) {
 function buildFlashcardSequence(items = state.flashcardDeck) {
   const sequenceItems = sortFlashcardItems(items, state.flashcardOrderMode);
   return sequenceItems.map((item) => item.id);
+}
+
+function syncFlashcardSequenceToItem(itemId) {
+  if (!itemId) {
+    return;
+  }
+
+  if (state.flashcardOrderMode === "favorite") {
+    state.flashcardSequenceIds = buildFlashcardSequence(state.flashcardDeck);
+  }
+
+  const nextIndex = state.flashcardSequenceIds.indexOf(itemId);
+  state.flashcardIndex = nextIndex >= 0 ? nextIndex : 0;
 }
 
 function getCurrentFlashcardItem() {
@@ -1787,6 +1847,7 @@ function renderFlashcard() {
   const currentItem = getCurrentFlashcardItem();
   const totalCards = state.flashcardSequenceIds.length;
   const showingMeaning = state.flashcardShowingMeaning;
+  const showingFavoritesOnly = state.flashcardOrderMode === "favorite";
 
   el.flashcardOrderMode.value = state.flashcardOrderMode;
 
@@ -1796,22 +1857,46 @@ function renderFlashcard() {
     el.flashcardNextBtn.disabled = true;
     el.flashcardCard.disabled = true;
     el.flashcardCard.dataset.face = "empty";
+    el.flashcardCard.removeAttribute("data-starred");
     el.flashcardCard.setAttribute("aria-label", "No flashcards available");
     el.flashcardFaceLabel.textContent = "Flashcards";
+    el.flashcardStarBadge.hidden = true;
+    el.flashcardStarBadge.removeAttribute("data-starred");
+    el.flashcardStarBadge.textContent = "☆";
+    el.flashcardStarBadge.setAttribute("aria-label", "Star current card");
+    el.flashcardStarBadge.title = "Star current card";
     el.flashcardLanguageLabel.textContent = "Deck";
-    el.flashcardCardText.textContent = "Add cards to your deck to start reviewing.";
-    el.flashcardHint.textContent = "Click a card to flip between the original text and its meaning.";
+    el.flashcardCardText.textContent =
+      showingFavoritesOnly && state.flashcardDeck.length
+        ? "No favorite cards yet."
+        : "Add cards to your deck to start reviewing.";
+    el.flashcardHint.textContent =
+      showingFavoritesOnly && state.flashcardDeck.length
+        ? "Star cards to review only your favorites here."
+        : "Click a card to flip between the original text and its meaning.";
     el.flashcardHint.hidden = false;
     schedulePopupResize();
     return;
   }
 
+  const starred = isDeckItemStarred(currentItem);
   el.flashcardProgress.textContent = `${state.flashcardIndex + 1} of ${totalCards}`;
   el.flashcardPrevBtn.disabled = false;
   el.flashcardNextBtn.disabled = false;
   el.flashcardCard.disabled = false;
   el.flashcardCard.dataset.face = showingMeaning ? "back" : "front";
+  if (starred) {
+    el.flashcardCard.dataset.starred = "true";
+    el.flashcardStarBadge.dataset.starred = "true";
+  } else {
+    el.flashcardCard.removeAttribute("data-starred");
+    el.flashcardStarBadge.removeAttribute("data-starred");
+  }
   el.flashcardFaceLabel.textContent = showingMeaning ? "Meaning" : "Original";
+  el.flashcardStarBadge.hidden = false;
+  el.flashcardStarBadge.textContent = starred ? "★" : "☆";
+  el.flashcardStarBadge.setAttribute("aria-label", starred ? "Unstar current card" : "Star current card");
+  el.flashcardStarBadge.title = starred ? "Unstar current card" : "Star current card";
   el.flashcardLanguageLabel.textContent = formatDeckLanguageIndicator(currentItem.sourceLang, currentItem.targetLang);
   el.flashcardCardText.textContent = showingMeaning ? currentItem.translatedText : currentItem.sourceText;
   el.flashcardHint.textContent = "";
@@ -1819,8 +1904,8 @@ function renderFlashcard() {
   el.flashcardCard.setAttribute(
     "aria-label",
     showingMeaning
-      ? `Flashcard meaning: ${currentItem.translatedText}`
-      : `Flashcard original text: ${currentItem.sourceText}`
+      ? `${starred ? "Starred " : ""}flashcard meaning: ${currentItem.translatedText}`
+      : `${starred ? "Starred " : ""}flashcard original text: ${currentItem.sourceText}`
   );
   schedulePopupResize();
 }
@@ -1837,6 +1922,20 @@ function toggleFlashcardFace() {
 
   state.flashcardShowingMeaning = !state.flashcardShowingMeaning;
   renderFlashcard();
+}
+
+async function handleFlashcardCardClick(event) {
+  const clickedStarBadge = event.composedPath().some(
+    (target) => target instanceof HTMLElement && target.id === "flashcardStarBadge"
+  );
+
+  if (clickedStarBadge) {
+    event.preventDefault();
+    await toggleCurrentFlashcardStar();
+    return;
+  }
+
+  toggleFlashcardFace();
 }
 
 function goToFlashcardStep(step) {
@@ -1883,6 +1982,26 @@ function goToPreviousFlashcard() {
 
 function goToNextFlashcard() {
   goToFlashcardStep(1);
+}
+
+async function toggleCurrentFlashcardStar() {
+  const currentItem = getCurrentFlashcardItem();
+  if (!currentItem) {
+    renderFlashcard();
+    return;
+  }
+
+  const nextStarred = !isDeckItemStarred(currentItem);
+  const { item: savedItem } = await upsertDeckItem({
+    ...currentItem,
+    starred: nextStarred
+  });
+
+  state.flashcardDeck = replaceItemById(state.flashcardDeck, savedItem);
+  state.deck = replaceItemById(state.deck, savedItem);
+  syncFlashcardSequenceToItem(savedItem.id);
+  renderFlashcard();
+  setStatus(nextStarred ? "Card starred." : "Card unstarred.");
 }
 
 function updateDeckPagination(totalItems) {
@@ -2063,7 +2182,9 @@ async function changeFlashcardOrderMode() {
   const modeLabel =
     state.flashcardOrderMode === "random"
       ? "random"
-      : state.flashcardOrderMode === "alpha-asc"
+      : state.flashcardOrderMode === "favorite"
+        ? "favorites only"
+        : state.flashcardOrderMode === "alpha-asc"
         ? "alphabetical A-Z"
         : state.flashcardOrderMode === "alpha-desc"
           ? "alphabetical Z-A"
@@ -2640,6 +2761,14 @@ function handleFlashcardKeyDown(event) {
     return;
   }
 
+  if (event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    Promise.resolve(toggleCurrentFlashcardStar()).catch((error) => {
+      handlePopupAsyncError(error, "Could not update card star.");
+    });
+    return;
+  }
+
   if (event.code === "Space" || event.key === " ") {
     event.preventDefault();
     toggleFlashcardFace();
@@ -2667,7 +2796,7 @@ function bindEvents() {
   bindAsyncEvent(el.saveBtn, "click", saveCurrentTranslation, "Could not save translation.");
   el.modifyBtn.addEventListener("click", enterTranslationDraftEditMode);
   bindAsyncEvent(el.flashcardOrderMode, "change", changeFlashcardOrderMode, "Could not update flashcard order.");
-  el.flashcardCard.addEventListener("click", toggleFlashcardFace);
+  bindAsyncEvent(el.flashcardCard, "click", handleFlashcardCardClick, "Could not update flashcard.");
   el.flashcardPrevBtn.addEventListener("click", goToPreviousFlashcard);
   el.flashcardNextBtn.addEventListener("click", goToNextFlashcard);
   bindAsyncEvent(el.loadSynonymsBtn, "click", () => loadSynonymsForCurrentTranslation("synonyms"), "Could not load synonyms.");
